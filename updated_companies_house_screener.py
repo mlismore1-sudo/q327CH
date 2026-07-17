@@ -155,6 +155,14 @@ def apply_custom_css() -> None:
             background: rgba(49, 51, 63, 0.04);
             margin-bottom: 1rem;
         }
+        .excluded-note {
+            padding: 0.75rem 1rem;
+            border-radius: 12px;
+            border: 1px solid rgba(180, 90, 90, 0.22);
+            background: rgba(180, 90, 90, 0.06);
+            margin: 0.75rem 0 1rem 0;
+            font-size: 0.92rem;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -315,6 +323,8 @@ def init_db() -> sqlite3.Connection:
     ensure_column(conn, "screened_companies", "high_sign_up_potential", "TEXT")
     ensure_column(conn, "screened_companies", "director_verification_acsp", "TEXT")
     ensure_column(conn, "screened_companies", "partner_formations_company", "INTEGER DEFAULT 0")
+    ensure_column(conn, "screened_companies", "excluded", "INTEGER DEFAULT 0")
+    ensure_column(conn, "screened_companies", "exclusion_reason", "TEXT")
     return conn
 
 
@@ -344,8 +354,8 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
             owned_by_company, owner_company_name,
             pulled_at, raw_json, profile_url, shortlisted, target_sic,
             target_address, target_address_detail, high_sign_up_potential,
-            director_verification_acsp, partner_formations_company
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            director_verification_acsp, partner_formations_company, excluded, exclusion_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row["company_number"],
@@ -369,6 +379,8 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
             row.get("high_sign_up_potential", ""),
             row.get("director_verification_acsp", ""),
             int(row.get("partner_formations_company", False)),
+            int(row.get("excluded", False)),
+            row.get("exclusion_reason", ""),
         ),
     )
     conn.commit()
@@ -579,6 +591,12 @@ def should_exclude_company(acsp_names: List[str]) -> bool:
     return bool(normalized & EXCLUDED_ACSPS)
 
 
+def matched_excluded_acsp(acsp_names: List[str]) -> str:
+    normalized = {normalize_text(name): name for name in acsp_names if normalize_text(name)}
+    matches = [normalized[key] for key in normalized if key in EXCLUDED_ACSPS]
+    return " | ".join(dedupe_preserve_order(matches))
+
+
 def is_partner_formations_company(acsp_names: List[str]) -> bool:
     normalized = {normalize_text(name) for name in acsp_names if normalize_text(name)}
     return bool(normalized & PARTNER_FORMATIONS_ACSPS)
@@ -637,13 +655,13 @@ def build_high_sign_up_potential(target_sic: bool, target_address: bool, partner
     return "⚡" * bolts
 
 
-def process_company(client: CHClient, item: Dict[str, Any], target_date: str) -> Optional[Dict[str, Any]]:
+def process_company(client: CHClient, item: Dict[str, Any], target_date: str) -> Dict[str, Any]:
     company_number = item.get("company_number", "")
     company_name = item.get("company_name") or item.get("title") or ""
     international_director, director_details, director_officers = collect_international_director_details(client, company_number)
     director_verification_acsp_names = extract_director_verification_acsp(director_officers)
-    if should_exclude_company(director_verification_acsp_names):
-        return None
+    excluded = should_exclude_company(director_verification_acsp_names)
+    excluded_match = matched_excluded_acsp(director_verification_acsp_names)
 
     international_shareholder, shareholder_details, owned_by_company, owner_names = analyse_psc_flags(client, company_number)
     target_sic = is_target_sic(item)
@@ -651,6 +669,8 @@ def process_company(client: CHClient, item: Dict[str, Any], target_date: str) ->
     partner_formations_company = is_partner_formations_company(director_verification_acsp_names)
     high_sign_up_potential = build_high_sign_up_potential(target_sic, target_address, partner_formations_company)
     owner_display = " | ".join([f"✓ {name}" for name in owner_names]) if owner_names else ""
+    exclusion_reason = f"ACSP excluded: {excluded_match}" if excluded_match else ("ACSP excluded: Tide/Anna" if excluded else "")
+
     return {
         "company_number": company_number,
         "company_name": company_name,
@@ -673,13 +693,15 @@ def process_company(client: CHClient, item: Dict[str, Any], target_date: str) ->
         "high_sign_up_potential": high_sign_up_potential,
         "director_verification_acsp": " | ".join(director_verification_acsp_names),
         "partner_formations_company": partner_formations_company,
+        "excluded": excluded,
+        "exclusion_reason": exclusion_reason,
     }
 
 
 def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
     if db_df.empty:
         return pd.DataFrame(columns=[
-            "Shortlist", "Target SIC", "Target Address", "Partner Formations Company", "High Sign Up Potential?", "Rating", "Company Name", "SIC Code", "Signals",
+            "Shortlist", "Excluded", "Exclusion Reason", "Target SIC", "Target Address", "Partner Formations Company", "High Sign Up Potential?", "Rating", "Company Name", "SIC Code", "Signals",
             "International Director", "International Shareholder", "Owned By A Company", "Target Address Detail", "Director Verification ACSP",
             "Profile", "Pulled At", "company_number",
         ])
@@ -689,6 +711,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
     target_sic_series = db_df.get("target_sic", pd.Series(0, index=db_df.index)).fillna(0).astype(int).astype(bool)
     target_address_series = db_df.get("target_address", pd.Series(0, index=db_df.index)).fillna(0).astype(int).astype(bool)
     partner_series = db_df.get("partner_formations_company", pd.Series(0, index=db_df.index)).fillna(0).astype(int).astype(bool)
+    excluded_series = db_df.get("excluded", pd.Series(0, index=db_df.index)).fillna(0).astype(int).astype(bool)
     high_sign_up_series = db_df.get("high_sign_up_potential", pd.Series("", index=db_df.index)).fillna("")
 
     for idx, row in db_df.iterrows():
@@ -699,6 +722,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
         target_flag = bool(target_sic_series.loc[idx])
         target_address_flag = bool(target_address_series.loc[idx])
         partner_flag = bool(partner_series.loc[idx])
+        excluded_flag = bool(excluded_series.loc[idx])
 
         if director_flag:
             labels.append("Director 🌍")
@@ -710,6 +734,8 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
             labels.append("Target address 📍")
         if partner_flag:
             labels.append("Partner formations ✅")
+        if excluded_flag:
+            labels.append("Excluded 🚫")
         signal_labels.append(" · ".join(labels))
 
         director_detail_values = [x.strip() for x in str(row.get("international_director_detail", "")).split("|") if x.strip()]
@@ -729,6 +755,8 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame({
         "Shortlist": db_df.get("shortlisted", pd.Series(0, index=db_df.index)).fillna(0).astype(int).astype(bool),
+        "Excluded": excluded_series.map(lambda x: "🚫" if x else ""),
+        "Exclusion Reason": db_df.get("exclusion_reason", pd.Series(dtype=str)).fillna(""),
         "Target SIC": target_sic_series.map(lambda x: "🎯" if x else ""),
         "Target Address": target_address_series.map(lambda x: "📍" if x else ""),
         "Partner Formations Company": partner_series.map(lambda x: "✓" if x else ""),
@@ -774,6 +802,7 @@ def apply_filters(df: pd.DataFrame, only_flagged: bool, selected_signals: List[s
 
 def render_kpis(display_df: pd.DataFrame) -> None:
     total = len(display_df)
+    excluded = int(display_df["Excluded"].astype(str).eq("🚫").sum()) if not display_df.empty else 0
     director = int(display_df["International Director"].astype(str).str.startswith("✓", na=False).sum()) if not display_df.empty else 0
     shareholder = int(display_df["International Shareholder"].astype(str).str.startswith("✓", na=False).sum()) if not display_df.empty else 0
     target_addresses = int(display_df["Target Address"].astype(str).eq("📍").sum()) if not display_df.empty else 0
@@ -786,18 +815,19 @@ def render_kpis(display_df: pd.DataFrame) -> None:
     shortlisted = int(display_df["Shortlist"].sum()) if not display_df.empty else 0
     target_sics = int(display_df["Target SIC"].astype(str).eq("🎯").sum()) if not display_df.empty else 0
 
-    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
+    c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(9)
     c1.metric("Total Results", f"{total:,}")
     c2.metric("Flagged Rows", f"{flagged:,}")
-    c3.metric("Intl Directors", f"{director:,}")
-    c4.metric("Intl Shareholders", f"{shareholder:,}")
-    c5.metric("Target SICs", f"{target_sics:,}")
-    c6.metric("Target Addresses", f"{target_addresses:,}")
-    c7.metric("Partner Formations", f"{partner_companies:,}")
-    c8.metric("Shortlisted", f"{shortlisted:,}")
+    c3.metric("Excluded", f"{excluded:,}")
+    c4.metric("Intl Directors", f"{director:,}")
+    c5.metric("Intl Shareholders", f"{shareholder:,}")
+    c6.metric("Target SICs", f"{target_sics:,}")
+    c7.metric("Target Addresses", f"{target_addresses:,}")
+    c8.metric("Partner Formations", f"{partner_companies:,}")
+    c9.metric("Shortlisted", f"{shortlisted:,}")
 
 
-def render_sidebar(default_date: date) -> Tuple[date, bool, List[str], str, str, bool, bool]:
+def render_sidebar(default_date: date) -> Tuple[date, bool, List[str], str, str, bool, bool, bool]:
     with st.sidebar:
         st.header("Screening controls")
         target_date = st.date_input("Incorporation date", value=default_date, format="YYYY-MM-DD")
@@ -805,13 +835,14 @@ def render_sidebar(default_date: date) -> Tuple[date, bool, List[str], str, str,
         st.divider()
         st.subheader("Result filters")
         only_flagged = st.checkbox("Show only flagged rows", value=False)
+        show_excluded = st.checkbox("Show excluded Tide/Anna rows", value=False)
         selected_signals = st.multiselect("Signals", options=SIGNAL_OPTIONS, default=SIGNAL_OPTIONS)
         sic_search = st.text_input("Filter by SIC code", placeholder="e.g. 62012")
         company_name_search = st.text_input("Filter by company name", placeholder="e.g. Labs")
         shortlisted_only = st.checkbox("Show shortlisted only", value=False)
         st.divider()
         st.caption("The sidebar keeps controls separate from the results table for faster screening.")
-    return target_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only
+    return target_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only, show_excluded
 
 
 def main() -> None:
@@ -840,12 +871,13 @@ def main() -> None:
     conn = init_db()
     client = CHClient(api_keys)
 
-    target_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only = render_sidebar(date.today())
+    target_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only, show_excluded = render_sidebar(date.today())
     date_str = target_date.strftime("%Y-%m-%d")
 
     if run:
         failures: List[str] = []
         excluded_count = 0
+        inserted_count = 0
         with st.status("Running Companies House screening...", expanded=True) as status:
             st.write("Querying advanced search with all SIC codes and company types in one request pattern.")
             companies, diagnostics = search_new_companies(client, date_str)
@@ -863,15 +895,16 @@ def main() -> None:
                 company_number = item.get("company_number", "unknown")
                 try:
                     row = process_company(client, item, date_str)
-                    if row is None:
+                    upsert_company(conn, row)
+                    inserted_count += 1
+                    if row.get("excluded"):
                         excluded_count += 1
-                    else:
-                        upsert_company(conn, row)
                 except Exception as exc:
                     failures.append(f"{company_number}: {exc}")
                 progress.progress(min(idx / total, 1.0))
 
-            st.write(f"Excluded due to ACSP rules: {excluded_count}")
+            st.write(f"Rows committed to database: {inserted_count}")
+            st.write(f"Excluded due to ACSP rules and committed: {excluded_count}")
             if failures:
                 st.warning(f"Failed enrichments: {len(failures)}")
                 st.code("\n".join(failures[:50]))
@@ -883,6 +916,12 @@ def main() -> None:
     display_df = build_display_df(db_df)
     render_kpis(display_df)
 
+    if (display_df["Excluded"].astype(str).eq("🚫").sum() if not display_df.empty else 0) > 0:
+        st.markdown(
+            "<div class='excluded-note'>Rows marked with 🚫 were verified by Tide or Anna, stored in the database, and will not be re-screened on later refreshes for the same incorporation date.</div>",
+            unsafe_allow_html=True,
+        )
+
     st.markdown(
         """
         <div class="signal-legend">
@@ -892,6 +931,7 @@ def main() -> None:
             <div class="signal-pill">Target SIC 🎯 = SIC 62012, 62020, 72110, 63110, or 58290</div>
             <div class="signal-pill">Target address 📍 = registered office partially matches a target address</div>
             <div class="signal-pill">Partner formations ✓ = director verified by approved formations partner</div>
+            <div class="signal-pill">Excluded 🚫 = verified by Tide or Anna and kept in the database</div>
             <div class="signal-pill">High sign up potential ⚡ = one bolt for target SIC + target address, plus one extra bolt for partner formations company</div>
             <div class="signal-pill">Rating ⭐ = 1 star per signal, including partner formations company, plus a bonus for Sweden, Norway, or USA director/shareholder</div>
         </div>
@@ -907,15 +947,16 @@ def main() -> None:
         company_name_search=company_name_search,
         shortlisted_only=shortlisted_only,
     )
+    if not show_excluded and "Excluded" in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df["Excluded"].astype(str) != "🚫"].copy()
 
-    tab_results, tab_shortlist, tab_settings = st.tabs(["Results", "Shortlist", "Settings"])
+    tab_results, tab_shortlist, tab_excluded, tab_settings = st.tabs(["Results", "Shortlist", "Excluded", "Settings"])
 
     with tab_results:
         st.subheader("Results")
-        st.caption(f"Loaded {len(api_keys)} API key(s) for {date_str}. {len(filtered_df):,} rows currently visible after filters.")
-
+        st.caption(f"Loaded {len(api_keys)} API key(s) for {date_str}. {len(filtered_df):,} active rows currently visible after filters.")
         editor_df = filtered_df[[
-            "Shortlist", "Target SIC", "Target Address", "Partner Formations Company", "High Sign Up Potential?", "Rating", "Company Name", "SIC Code", "Signals",
+            "Shortlist", "Excluded", "Exclusion Reason", "Target SIC", "Target Address", "Partner Formations Company", "High Sign Up Potential?", "Rating", "Company Name", "SIC Code", "Signals",
             "International Director", "International Shareholder", "Owned By A Company", "Target Address Detail", "Director Verification ACSP",
             "Profile", "Pulled At", "company_number",
         ]].copy()
@@ -925,12 +966,14 @@ def main() -> None:
             use_container_width=True,
             hide_index=True,
             disabled=[
-                "Target SIC", "Target Address", "Partner Formations Company", "High Sign Up Potential?", "Rating", "Company Name", "SIC Code", "Signals",
+                "Excluded", "Exclusion Reason", "Target SIC", "Target Address", "Partner Formations Company", "High Sign Up Potential?", "Rating", "Company Name", "SIC Code", "Signals",
                 "International Director", "International Shareholder", "Owned By A Company", "Target Address Detail", "Director Verification ACSP",
                 "Profile", "Pulled At", "company_number",
             ],
             column_config={
                 "Shortlist": st.column_config.CheckboxColumn("Shortlist", help="Tick to mark this company for follow-up."),
+                "Excluded": st.column_config.TextColumn("Excluded", width="small", help="🚫 means Tide or Anna verified. The row is stored and will not be re-screened."),
+                "Exclusion Reason": st.column_config.TextColumn("Exclusion Reason", width="large"),
                 "Target SIC": st.column_config.TextColumn("Target SIC", width="small", help="Automatically marked 🎯 when SIC includes 62012, 62020, 72110, 63110, or 58290."),
                 "Target Address": st.column_config.TextColumn("Target Address", width="small", help="Automatically marked 📍 when the registered office partially matches one of the target addresses."),
                 "Partner Formations Company": st.column_config.TextColumn("Partner Formations Company", width="small", help="Marked ✓ when directors were verified by Made Simple Group Limited ACSP, 1st Formations Limited ACSP, or ICON OFFICES LIMITED ACSP."),
@@ -995,6 +1038,20 @@ def main() -> None:
                 use_container_width=True,
             )
 
+    with tab_excluded:
+        st.subheader("Excluded")
+        excluded_df = display_df[display_df["Excluded"].astype(str) == "🚫"].copy()
+        if excluded_df.empty:
+            st.info("No Tide/Anna excluded companies have been stored for this date yet.")
+        else:
+            st.caption("These rows are committed to the database so they will not be re-screened on future refreshes for the same incorporation date.")
+            st.dataframe(
+                excluded_df.drop(columns=["company_number"], errors="ignore"),
+                use_container_width=True,
+                hide_index=True,
+                column_config={"Profile": st.column_config.LinkColumn("Profile", display_text="Open record")},
+            )
+
     with tab_settings:
         st.subheader("Current search settings")
         st.markdown(
@@ -1009,8 +1066,8 @@ def main() -> None:
 - Advanced search page size: {SEARCH_PAGE_SIZE}
 - Officers page size: {OFFICERS_PAGE_SIZE}
 - PSC page size: {PSC_PAGE_SIZE}
-- Dedupe rule: company numbers already screened for the selected incorporation date are skipped
-- UI enhancements: sidebar filters, KPI cards, workflow tabs, clickable profile links, shortlist workflow, target SIC tagging, target address tagging, partner formations tagging, high sign up potential column, rating column
+- Dedupe rule: company numbers already written to the database for the selected incorporation date are skipped, including Tide/Anna excluded rows
+- UI enhancements: sidebar filters, KPI cards, workflow tabs, clickable profile links, shortlist workflow, target SIC tagging, target address tagging, partner formations tagging, high sign up potential column, rating column, persisted Tide/Anna exclusions hidden from main results by default
             """
         )
         st.write("Selected signals for current filter:", ", ".join(selected_signals) if selected_signals else "None")
