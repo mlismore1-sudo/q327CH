@@ -529,33 +529,48 @@ def match_target_address(item: Dict[str, Any]) -> Tuple[bool, List[str], str]:
     return bool(deduped), deduped, full_address
 
 
+def walk_strings(value: Any) -> List[str]:
+    results: List[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_norm = normalize_text(key)
+            if isinstance(child, str):
+                child_text = child.strip()
+                child_norm = normalize_text(child_text)
+                if any(token in key_norm for token in ["verify", "verification", "provider", "acsp", "authorised", "authorized", "identity"]):
+                    results.append(child_text)
+                elif "acsp" in child_norm:
+                    results.append(child_text)
+            else:
+                results.extend(walk_strings(child))
+    elif isinstance(value, list):
+        for child in value:
+            results.extend(walk_strings(child))
+    return results
+
+
 def extract_director_verification_acsp(director_officers: List[Dict[str, Any]]) -> List[str]:
     matches: List[str] = []
+    priority_keys = [
+        "verified_by",
+        "verified_by_name",
+        "identity_verification_provider",
+        "identity_verification_provider_name",
+        "acsp_name",
+        "authorized_corporate_service_provider_name",
+        "authorised_corporate_service_provider_name",
+        "identity_verified_by",
+        "identity_verification",
+        "verification_details",
+    ]
     for officer in director_officers:
-        for key in [
-            "verified_by",
-            "verified_by_name",
-            "identity_verification_provider",
-            "identity_verification_provider_name",
-            "acsp_name",
-            "authorized_corporate_service_provider_name",
-        ]:
+        for key in priority_keys:
             value = officer.get(key)
-            if value:
-                matches.append(str(value).strip())
-        identity = officer.get("identity_verification_details") or {}
-        if isinstance(identity, dict):
-            for key in [
-                "verified_by",
-                "verified_by_name",
-                "identity_verification_provider",
-                "identity_verification_provider_name",
-                "acsp_name",
-                "authorized_corporate_service_provider_name",
-            ]:
-                value = identity.get(key)
-                if value:
-                    matches.append(str(value).strip())
+            if isinstance(value, str) and value.strip():
+                matches.append(value.strip())
+            elif isinstance(value, (dict, list)):
+                matches.extend(walk_strings(value))
+        matches.extend(walk_strings(officer))
     return dedupe_preserve_order(matches)
 
 
