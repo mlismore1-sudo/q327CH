@@ -195,9 +195,9 @@ def country_label(value: str) -> str:
 
 
 def format_flagged_countries(values: List[str]) -> str:
-    canonical_values = dedupe_preserve_order([
-        canonical_country_from_value(v) for v in values if canonical_country_from_value(v)
-    ])
+    canonical_values = dedupe_preserve_order(
+        [canonical_country_from_value(v) for v in values if canonical_country_from_value(v)]
+    )
     if not canonical_values:
         return ""
     parts = [f"✓ {COUNTRY_FLAG_MAP.get(v, '🌍')} {country_label(v)}" for v in canonical_values]
@@ -205,9 +205,9 @@ def format_flagged_countries(values: List[str]) -> str:
 
 
 def extract_country_flags(values: List[str]) -> List[str]:
-    canonical_values = dedupe_preserve_order([
-        canonical_country_from_value(v) for v in values if canonical_country_from_value(v)
-    ])
+    canonical_values = dedupe_preserve_order(
+        [canonical_country_from_value(v) for v in values if canonical_country_from_value(v)]
+    )
     flags: List[str] = []
     for v in canonical_values:
         flag = COUNTRY_FLAG_MAP.get(v)
@@ -218,7 +218,9 @@ def extract_country_flags(values: List[str]) -> List[str]:
 
 def make_company_profile_url(company_number: str, company_name: str) -> str:
     safe_name = quote(company_name or "company")
-    return f"https://find-and-update.company-information.service.gov.uk/company/{company_number}#{safe_name}"
+    return (
+        f"https://find-and-update.company-information.service.gov.uk/company/{company_number}#{safe_name}"
+    )
 
 
 class CHClient:
@@ -327,7 +329,8 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
             pulled_at, raw_json, profile_url, shortlisted, target_sic,
             target_address, target_address_detail, target_indicators
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
+        """
+        ,
         (
             row["company_number"],
             row["company_name"],
@@ -366,13 +369,19 @@ def read_db_rows(conn: sqlite3.Connection, incorporation_date: Optional[str] = N
 def validate_api_keys() -> List[str]:
     if "COMPANIES_HOUSE_API_KEYS" not in st.secrets:
         raise ValueError("Missing COMPANIES_HOUSE_API_KEYS in .streamlit/secrets.toml")
-    keys = [str(k).strip() for k in list(st.secrets["COMPANIES_HOUSE_API_KEYS"]) if str(k).strip()]
+    keys = [
+        str(k).strip()
+        for k in list(st.secrets["COMPANIES_HOUSE_API_KEYS"])
+        if str(k).strip()
+    ]
     if not keys:
         raise ValueError("COMPANIES_HOUSE_API_KEYS is empty")
     return keys
 
 
-def paged_get_items(client: CHClient, path: str, page_size: int, extra_params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+def paged_get_items(
+    client: CHClient, path: str, page_size: int, extra_params: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     start_index = 0
     while True:
@@ -406,7 +415,7 @@ def search_new_companies(client: CHClient, target_date: str) -> Tuple[List[Dict[
         "incorporated_to": target_date,
         "company_status": "active",
         "company_type": ",".join(ALLOWED_COMPANY_TYPES),
-        "sic_.codes": ",".join(ALLOWED_SIC_CODES),
+        "sic_codes": ",".join(ALLOWED_SIC_CODES),
     }
     items = paged_get_items(client, "/advanced-search/companies", SEARCH_PAGE_SIZE, params)
     filtered: List[Dict[str, Any]] = []
@@ -439,7 +448,9 @@ def get_all_officers(client: CHClient, company_number: str) -> List[Dict[str, An
 
 
 def get_all_pscs(client: CHClient, company_number: str) -> List[Dict[str, Any]]:
-    return paged_get_items(client, f"/company/{company_number}/persons-with-significant-control", PSC_PAGE_SIZE)
+    return paged_get_items(
+        client, f"/company/{company_number}/persons-with-significant-control", PSC_PAGE_SIZE
+    )
 
 
 def collect_international_director_details(
@@ -465,7 +476,9 @@ def collect_international_director_details(
     return bool(deduped), deduped, director_count
 
 
-def analyse_psc_flags(client: CHClient, company_number: str) -> Tuple[bool, List[str], bool, List[str]]:
+def analyse_psc_flags(
+    client: CHClient, company_number: str
+) -> Tuple[bool, List[str], bool, List[str]]:
     pscs = get_all_pscs(client, company_number)
     shareholder_matches: List[str] = []
     owner_names: List[str] = []
@@ -619,11 +632,13 @@ def process_company(client: CHClient, item: Dict[str, Any], target_date: str) ->
 
 def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
     if db_df.empty:
-        return pd.DataFrame(columns=[
-            "Shortlist", "Target SIC", "Rating", "Target Indicators", "Company Name", "SIC Code", "Signals",
-            "International Director", "International Shareholder", "Owned By A Company",
-            "Profile", "Pulled At", "company_number",
-        ])
+        return pd.DataFrame(
+            columns=[
+                "Shortlist", "Target SIC", "Rating", "Target Indicators", "Company Name",
+                "SIC Code", "Signals", "International Director", "International Shareholder",
+                "Owned By A Company", "Profile", "Pulled At", "company_number",
+            ]
+        )
 
     signal_labels: List[str] = []
     rating_series: List[str] = []
@@ -664,21 +679,23 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
             )
         )
 
-    return pd.DataFrame({
-        "Shortlist": db_df.get("shortlisted", pd.Series(0, index=db_df.index)).fillna(0).astype(int).astype(bool),
-        "Target SIC": target_sic_series.map(lambda x: "🎯" if x else ""),
-        "Rating": rating_series,
-        "Target Indicators": target_indicators_series,
-        "Company Name": db_df["company_name"],
-        "SIC Code": db_df["sic_code"],
-        "Signals": signal_labels,
-        "International Director": db_df.get("international_director_detail", pd.Series(dtype=str)).fillna(""),
-        "International Shareholder": db_df.get("international_shareholder_detail", pd.Series(dtype=str)).fillna(""),
-        "Owned By A Company": db_df.get("owner_company_name", pd.Series(dtype=str)).fillna(""),
-        "Profile": db_df.get("profile_url", pd.Series(dtype=str)).fillna(""),
-        "Pulled At": db_df["pulled_at"],
-        "company_number": db_df["company_number"],
-    })
+    return pd.DataFrame(
+        {
+            "Shortlist": db_df.get("shortlisted", pd.Series(0, index=db_df.index)).fillna(0).astype(int).astype(bool),
+            "Target SIC": target_sic_series.map(lambda x: "🎯" if x else ""),
+            "Rating": rating_series,
+            "Target Indicators": target_indicators_series,
+            "Company Name": db_df["company_name"],
+            "SIC Code": db_df["sic_code"],
+            "Signals": signal_labels,
+            "International Director": db_df.get("international_director_detail", pd.Series(dtype=str)).fillna(""),
+            "International Shareholder": db_df.get("international_shareholder_detail", pd.Series(dtype=str)).fillna(""),
+            "Owned By A Company": db_df.get("owner_company_name", pd.Series(dtype=str)).fillna(""),
+            "Profile": db_df.get("profile_url", pd.Series(dtype=str)).fillna(""),
+            "Pulled At": db_df["pulled_at"],
+            "company_number": db_df["company_number"],
+        }
+    )
 
 
 def apply_filters(
@@ -691,7 +708,7 @@ def apply_filters(
 ) -> pd.DataFrame:
     filtered = df.copy()
     if shortlisted_only and "Shortlist" in filtered.columns:
-        filtered = filtered[filtered["Shortlist"] == True].copy()
+        filtered = filtered[filtered["Shortlist"] is True].copy()
     if only_flagged:
         mask = pd.Series(False, index=filtered.index)
         if "International Director" in selected_signals:
@@ -707,7 +724,9 @@ def apply_filters(
         ].copy()
     if company_name_search.strip():
         filtered = filtered[
-            filtered["Company Name"].astype(str).str.contains(re.escape(company_name_search.strip()), case=False, na=False)
+            filtered["Company Name"].astype(str).str.contains(
+                re.escape(company_name_search.strip()), case=False, na=False
+            )
         ].copy()
     return filtered
 
@@ -786,11 +805,11 @@ def main() -> None:
 
     with st.expander("Secrets format", expanded=False):
         st.code(
-            "COMPANIES_HOUSE_API_KEYS = [
-  "key-1",
-  "key-2",
-  "key-3"
-]",
+            "COMPANIES_HOUSE_API_KEYS = [\n"
+            "  \"key-1\",\n"
+            "  \"key-2\",\n"
+            "  \"key-3\"\n"
+            "]",
             language="toml",
         )
 
@@ -803,9 +822,15 @@ def main() -> None:
     conn = init_db()
     client = CHClient(api_keys)
 
-    target_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only = render_sidebar(
-        date.today()
-    )
+    (
+        target_date,
+        run,
+        selected_signals,
+        sic_search,
+        company_name_search,
+        only_flagged,
+        shortlisted_only,
+    ) = render_sidebar(date.today())
     date_str = target_date.strftime("%Y-%m-%d")
 
     if run:
@@ -834,8 +859,7 @@ def main() -> None:
 
             if failures:
                 st.warning(f"Failed enrichments: {len(failures)}")
-                st.code("
-".join(failures[:50]))
+                st.code("\n".join(failures[:50]))
                 status.update(label="Completed with some errors", state="error")
             else:
                 status.update(label="Refresh complete", state="complete")
@@ -874,20 +898,41 @@ def main() -> None:
             f"Loaded {len(api_keys)} API key(s) for {date_str}. {len(filtered_df):,} rows currently visible after filters."
         )
 
-        editor_df = filtered_df[[
-            "Shortlist", "Target SIC", "Rating", "Target Indicators", "Company Name", "SIC Code", "Signals",
-            "International Director", "International Shareholder", "Owned By A Company",
-            "Profile", "Pulled At", "company_number",
-        ]].copy()
+        editor_df = filtered_df[
+            [
+                "Shortlist",
+                "Target SIC",
+                "Rating",
+                "Target Indicators",
+                "Company Name",
+                "SIC Code",
+                "Signals",
+                "International Director",
+                "International Shareholder",
+                "Owned By A Company",
+                "Profile",
+                "Pulled At",
+                "company_number",
+            ]
+        ].copy()
 
         edited_df = st.data_editor(
             editor_df,
             use_container_width=True,
             hide_index=True,
             disabled=[
-                "Target SIC", "Rating", "Target Indicators", "Company Name", "SIC Code", "Signals",
-                "International Director", "International Shareholder", "Owned By A Company",
-                "Profile", "Pulled At", "company_number",
+                "Target SIC",
+                "Rating",
+                "Target Indicators",
+                "Company Name",
+                "SIC Code",
+                "Signals",
+                "International Director",
+                "International Shareholder",
+                "Owned By A Company",
+                "Profile",
+                "Pulled At",
+                "company_number",
             ],
             column_config={
                 "Shortlist": st.column_config.CheckboxColumn(
@@ -911,15 +956,9 @@ def main() -> None:
                 "Company Name": st.column_config.TextColumn("Company Name", width="large"),
                 "SIC Code": st.column_config.TextColumn("SIC Code", width="small"),
                 "Signals": st.column_config.TextColumn("Signals", width="medium"),
-                "International Director": st.column_config.TextColumn(
-                    "International Director", width="large"
-                ),
-                "International Shareholder": st.column_config.TextColumn(
-                    "International Shareholder", width="large"
-                ),
-                "Owned By A Company": st.column_config.TextColumn(
-                    "Owned By A Company", width="large"
-                ),
+                "International Director": st.column_config.TextColumn("International Director", width="large"),
+                "International Shareholder": st.column_config.TextColumn("International Shareholder", width="large"),
+                "Owned By A Company": st.column_config.TextColumn("Owned By A Company", width="large"),
                 "Profile": st.column_config.LinkColumn("Profile", display_text="Open record", width="small"),
                 "Pulled At": st.column_config.TextColumn("Pulled At", width="medium"),
                 "company_number": None,
@@ -954,7 +993,7 @@ def main() -> None:
 
     with tab_shortlist:
         st.subheader("Shortlist")
-        shortlist_df = display_df[display_df["Shortlist"] == True].copy()
+        shortlist_df = display_df[display_df["Shortlist"] is True].copy()
         if shortlist_df.empty:
             st.info(
                 "No shortlisted companies yet. Tick the shortlist checkbox in the Results tab to build a follow-up queue."
