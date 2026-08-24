@@ -17,11 +17,33 @@ DB_PATH = "companies_house_screening.db"
 SEARCH_PAGE_SIZE = 5000
 OFFICERS_PAGE_SIZE = 100
 PSC_PAGE_SIZE = 100
+
+# Core SICs you were already screening
 ALLOWED_SIC_CODES = [
     "62012", "62020", "63120", "47910", "46190", "46499", "70229", "73110", "74909", "68209",
     "64209", "68100", "32990", "10890", "86900", "93130", "96040", "82990", "72110", "56101",
 ]
 TARGET_SIC_CODES = {"62012", "72110", "56101"}
+
+# Manufacturing & wholesale SICs (new)
+MANUFACTURING_WHOLESALE_SIC_CODES = {
+    "10110", "10130", "10310", "10410", "10511", "10512", "10611", "10612", "10840", "10850", "10890",
+    "10920", "13100", "13200", "13300", "13921", "13923", "13960", "14131", "15110", "16290", "19200",
+    "20110", "20120", "20130", "20140", "20150", "20160", "20170", "20200", "20301", "20302", "20411",
+    "20412", "20590", "21100", "22210", "22290", "23190", "23910", "23990", "24100", "24200", "24310",
+    "24320", "24330", "24340", "24410", "24420", "24430", "24440", "24450", "24460", "24510", "25110",
+    "25210", "25500", "25990", "26110", "26200", "26300", "26511", "26512", "26600", "27110", "27200",
+    "28110", "28290", "28300", "28990", "29100", "29310", "30110", "30300", "31090", "32990", "46110",
+    "46120", "46130", "46140", "46150", "46160", "46170", "46180", "46190", "46210", "46220", "46230",
+    "46240", "46310", "46320", "46330", "46341", "46342", "46350", "46360", "46370", "46380", "46390",
+    "46410", "46420", "46431", "46439", "46440", "46450", "46460", "46470", "46480", "46499", "46510",
+    "46520", "46530", "46610", "46620", "46630", "46640", "46650", "46660", "46690", "46711", "46719",
+    "46720", "46730", "46740", "46750", "46900",
+}
+
+# Union of core SICs and manufacturing/wholesale for API search & matching
+ALL_ALLOWED_SIC_CODES = list({*ALLOWED_SIC_CODES, *MANUFACTURING_WHOLESALE_SIC_CODES})
+
 BONUS_STAR_COUNTRIES = {"sweden", "norway", "united states"}
 ALLOWED_COMPANY_TYPES = [
     "ltd",
@@ -409,13 +431,13 @@ def search_new_companies(client: CHClient, target_date: str) -> Tuple[List[Dict[
         "incorporated_to": target_date,
         "company_status": "active",
         "company_type": ",".join(ALLOWED_COMPANY_TYPES),
-        "sic_codes": ",".join(ALLOWED_SIC_CODES),
+        "sic_codes": ",".join(ALL_ALLOWED_SIC_CODES),
     }
     items = paged_get_items(client, "/advanced-search/companies", SEARCH_PAGE_SIZE, params)
     filtered: List[Dict[str, Any]] = []
     for item in items:
         item_sics = [str(x) for x in (item.get("sic_codes") or [])]
-        if not any(code in ALLOWED_SIC_CODES for code in item_sics):
+        if not any(code in ALL_ALLOWED_SIC_CODES for code in item_sics):
             continue
         if item.get("company_status", "").lower() != "active":
             continue
@@ -432,7 +454,7 @@ def search_new_companies(client: CHClient, target_date: str) -> Tuple[List[Dict[
         "filtered_results": len(filtered),
         "deduped_results": len(deduped),
         "company_types_sent": ", ".join(ALLOWED_COMPANY_TYPES),
-        "sic_count": len(ALLOWED_SIC_CODES),
+        "sic_count": len(ALL_ALLOWED_SIC_CODES),
     }
     return list(deduped.values()), diagnostics
 
@@ -442,9 +464,7 @@ def get_all_officers(client: CHClient, company_number: str) -> List[Dict[str, An
 
 
 def get_all_pscs(client: CHClient, company_number: str) -> List[Dict[str, Any]]:
-    return paged_get_items(
-        client, f"/company/{company_number}/persons-with-significant-control", PSC_PAGE_SIZE
-    )
+    return paged_get_items(client, f"/company/{company_number}/persons-with-significant-control", PSC_PAGE_SIZE)
 
 
 def collect_international_director_details(
@@ -496,7 +516,7 @@ def analyse_psc_flags(
 
 def parse_matching_sic(item: Dict[str, Any]) -> str:
     item_sics = [str(code) for code in (item.get("sic_codes") or [])]
-    matched = [code for code in item_sics if code in ALLOWED_SIC_CODES]
+    matched = [code for code in item_sics if code in ALL_ALLOWED_SIC_CODES]
     return ", ".join(matched or item_sics[:1])
 
 
@@ -724,6 +744,7 @@ def apply_filters(
     sic_search: str,
     company_name_search: str,
     shortlisted_only: bool,
+    hide_mfg_wholesale: bool,
 ) -> pd.DataFrame:
     filtered = df.copy()
     if shortlisted_only and "Shortlist" in filtered.columns:
@@ -747,6 +768,11 @@ def apply_filters(
                 re.escape(company_name_search.strip()), case=False, na=False
             )
         ].copy()
+    if hide_mfg_wholesale:
+        def is_mfg_wh_sic(s: str) -> bool:
+            codes = [c.strip() for c in str(s).split(",") if c.strip()]
+            return any(code in MANUFACTURING_WHOLESALE_SIC_CODES for code in codes)
+        filtered = filtered[~filtered["SIC Code"].astype(str).apply(is_mfg_wh_sic)].copy()
     return filtered
 
 
@@ -789,7 +815,7 @@ def render_kpis(display_df: pd.DataFrame) -> None:
     c6.metric("Shortlisted", f"{shortlisted:,}")
 
 
-def render_sidebar(default_date: date) -> Tuple[date, bool, List[str], str, str, bool, bool]:
+def render_sidebar(default_date: date) -> Tuple[date, bool, List[str], str, str, bool, bool, bool]:
     with st.sidebar:
         st.header("Screening controls")
         target_date = st.date_input("Incorporation date", value=default_date, format="YYYY-MM-DD")
@@ -798,12 +824,22 @@ def render_sidebar(default_date: date) -> Tuple[date, bool, List[str], str, str,
         st.subheader("Result filters")
         only_flagged = st.checkbox("Show only flagged rows", value=False)
         selected_signals = st.multiselect("Signals", options=SIGNAL_OPTIONS, default=SIGNAL_OPTIONS)
+        hide_mfg_wholesale = st.checkbox("Hide Manufacturing & Wholesale SICs", value=False)
         sic_search = st.text_input("Filter by SIC code", placeholder="e.g. 62012")
         company_name_search = st.text_input("Filter by company name", placeholder="e.g. Labs")
         shortlisted_only = st.checkbox("Show shortlisted only", value=False)
         st.divider()
         st.caption("The sidebar keeps controls separate from the results table for faster screening.")
-    return target_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only
+    return (
+        target_date,
+        run,
+        selected_signals,
+        sic_search,
+        company_name_search,
+        only_flagged,
+        shortlisted_only,
+        hide_mfg_wholesale,
+    )
 
 
 def main() -> None:
@@ -849,6 +885,7 @@ def main() -> None:
         company_name_search,
         only_flagged,
         shortlisted_only,
+        hide_mfg_wholesale,
     ) = render_sidebar(date.today())
     date_str = target_date.strftime("%Y-%m-%d")
 
@@ -895,6 +932,7 @@ def main() -> None:
             <div class="signal-pill">Signals = country flags (director/shareholder based in target countries) + 🏢 for corporate PSCs</div>
             <div class="signal-pill">Target Indicators = 🎯, 🏠, country flags, and number emoji for 2+ directors</div>
             <div class="signal-pill">Rating ⭐ = 1 star per signal, plus a bonus for Sweden, Norway, or USA director/shareholder</div>
+            <div class="signal-pill">Manufacturing & Wholesale SICs = can be hidden via sidebar toggle</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -907,6 +945,7 @@ def main() -> None:
         sic_search=sic_search,
         company_name_search=company_name_search,
         shortlisted_only=shortlisted_only,
+        hide_mfg_wholesale=hide_mfg_wholesale,
     )
 
     tab_results, tab_shortlist, tab_settings = st.tabs(["Results", "Shortlist", "Settings"])
@@ -1047,13 +1086,14 @@ def main() -> None:
             f"""
 - Company status: Active
 - Company types sent to API: `{', '.join(ALLOWED_COMPANY_TYPES)}`
-- SIC codes sent to API: {len(ALLOWED_SIC_CODES)} values
+- SIC codes sent to API (core): {len(ALLOWED_SIC_CODES)} values
+- Manufacturing & Wholesale SIC codes: {len(MANUFACTURING_WHOLESALE_SIC_CODES)} values
 - Target SIC codes: `{', '.join(sorted(TARGET_SIC_CODES))}`
 - Advanced search page size: {SEARCH_PAGE_SIZE}
 - Officers page size: {OFFICERS_PAGE_SIZE}
 - PSC page size: {PSC_PAGE_SIZE}
 - Dedupe rule: company numbers already screened for the selected incorporation date are skipped
-- UI enhancements: sidebar filters, KPI cards, workflow tabs, clickable profile links, shortlist workflow, target SIC tagging, rating column, target indicators column, emoji-only Signals column
+- UI enhancements: sidebar filters (including Manufacturing & Wholesale toggle), KPI cards, workflow tabs, clickable profile links, shortlist workflow, target SIC tagging, rating column, target indicators column, emoji-only Signals column
             """
         )
         st.write("Selected signals for current filter:", ", ".join(selected_signals) if selected_signals else "None")
