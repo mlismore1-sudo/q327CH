@@ -406,7 +406,7 @@ def search_new_companies(client: CHClient, target_date: str) -> Tuple[List[Dict[
         "incorporated_to": target_date,
         "company_status": "active",
         "company_type": ",".join(ALLOWED_COMPANY_TYPES),
-        "sic_codes": ",".join(ALLOWED_SIC_CODES),
+        "sic_.codes": ",".join(ALLOWED_SIC_CODES),
     }
     items = paged_get_items(client, "/advanced-search/companies", SEARCH_PAGE_SIZE, params)
     filtered: List[Dict[str, Any]] = []
@@ -527,9 +527,9 @@ def build_target_indicators(
 ) -> str:
     indicators: List[str] = []
     if target_sic:
-        indicators.append("🎯")  # 🎯
+        indicators.append("🎯")
     if target_address:
-        indicators.append("🏠")  # 🏠
+        indicators.append("🏠")
     flags = extract_country_flags(director_details) + extract_country_flags(shareholder_details)
     flags = dedupe_preserve_order(flags)
     indicators.extend(flags)
@@ -546,7 +546,7 @@ def build_target_indicators(
             7: "7️⃣",
             8: "8️⃣",
             9: "9️⃣",
-            10: "🔟",  # 🔟
+            10: "🔟",
         }
         indicators.append(number_emojis.get(num, "#️⃣"))
     return " ".join(indicators)
@@ -571,7 +571,7 @@ def build_rating(
         stars += 1
     if has_bonus_star(director_details) or has_bonus_star(shareholder_details):
         stars += 1
-    return "⭐" * stars  # ⭐
+    return "⭐" * stars
 
 
 def process_company(client: CHClient, item: Dict[str, Any], target_date: str) -> Dict[str, Any]:
@@ -645,7 +645,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
         labels.extend(director_flags)
         labels.extend(shareholder_flags)
         if owner_detail_str.startswith("✓"):
-            labels.append("🏢")  # 🏢
+            labels.append("🏢")
         signal_labels.append(" ".join(dedupe_preserve_order(labels)))
 
         director_flag = bool(director_flags)
@@ -666,7 +666,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame({
         "Shortlist": db_df.get("shortlisted", pd.Series(0, index=db_df.index)).fillna(0).astype(int).astype(bool),
-        "Target SIC": target_sic_series.map(lambda x: "🎯" if x else ""),  # 🎯
+        "Target SIC": target_sic_series.map(lambda x: "🎯" if x else ""),
         "Rating": rating_series,
         "Target Indicators": target_indicators_series,
         "Company Name": db_df["company_name"],
@@ -737,7 +737,7 @@ def render_kpis(display_df: pd.DataFrame) -> None:
     )
     shortlisted = int(display_df["Shortlist"].sum()) if not display_df.empty else 0
     target_sics = (
-        int(display_df["Target SIC"].astype(str).eq("🎯").sum())  # 🎯
+        int(display_df["Target SIC"].astype(str).eq("🎯").sum())
         if not display_df.empty
         else 0
     )
@@ -785,11 +785,14 @@ def main() -> None:
     )
 
     with st.expander("Secrets format", expanded=False):
-        st.code('COMPANIES_HOUSE_API_KEYS = [
+        st.code(
+            "COMPANIES_HOUSE_API_KEYS = [
   "key-1",
   "key-2",
   "key-3"
-]', language="toml")
+]",
+            language="toml",
+        )
 
     try:
         api_keys = validate_api_keys()
