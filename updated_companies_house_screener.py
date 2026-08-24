@@ -195,9 +195,9 @@ def country_label(value: str) -> str:
 
 
 def format_flagged_countries(values: List[str]) -> str:
-    canonical_values = dedupe_preserve_order([
-        canonical_country_from_value(v) for v in values if canonical_country_from_value(v)
-    ])
+    canonical_values = dedupe_preserve_order(
+        [canonical_country_from_value(v) for v in values if canonical_country_from_value(v)]
+    )
     if not canonical_values:
         return ""
     parts = [f"✓ {COUNTRY_FLAG_MAP.get(v, '🌍')} {country_label(v)}" for v in canonical_values]
@@ -205,9 +205,9 @@ def format_flagged_countries(values: List[str]) -> str:
 
 
 def extract_country_flags(values: List[str]) -> List[str]:
-    canonical_values = dedupe_preserve_order([
-        canonical_country_from_value(v) for v in values if canonical_country_from_value(v)
-    ])
+    canonical_values = dedupe_preserve_order(
+        [canonical_country_from_value(v) for v in values if canonical_country_from_value(v)]
+    )
     flags: List[str] = []
     for v in canonical_values:
         flag = COUNTRY_FLAG_MAP.get(v)
@@ -373,7 +373,9 @@ def validate_api_keys() -> List[str]:
     return keys
 
 
-def paged_get_items(client: CHClient, path: str, page_size: int, extra_params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+def paged_get_items(
+    client: CHClient, path: str, page_size: int, extra_params: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     start_index = 0
     while True:
@@ -687,7 +689,9 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
             "SIC Code": db_df["sic_code"],
             "Signals": signal_labels,
             "International Director": db_df.get("international_director_detail", pd.Series(dtype=str)).fillna(""),
-            "International Shareholder": db_df.get("international_shareholder_detail", pd.Series(dtype=str)).fillna(""),
+            "International Shareholder": db_df.get("international_shareholder_detail", pd.Series(dtype=str)).fillna(
+                ""
+            ),
             "Owned By A Company": db_df.get("owner_company_name", pd.Series(dtype=str)).fillna(""),
             "Profile": db_df.get("profile_url", pd.Series(dtype=str)).fillna(""),
             "Pulled At": db_df["pulled_at"],
@@ -803,11 +807,11 @@ def main() -> None:
 
     with st.expander("Secrets format", expanded=False):
         st.code(
-            "COMPANIES_HOUSE_API_KEYS = [
+            '''COMPANIES_HOUSE_API_KEYS = [
   "key-1",
   "key-2",
   "key-3"
-]",
+]''',
             language="toml",
         )
 
@@ -820,9 +824,15 @@ def main() -> None:
     conn = init_db()
     client = CHClient(api_keys)
 
-    target_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only = render_sidebar(
-        date.today()
-    )
+    (
+        target_date,
+        run,
+        selected_signals,
+        sic_search,
+        company_name_search,
+        only_flagged,
+        shortlisted_only,
+    ) = render_sidebar(date.today())
     date_str = target_date.strftime("%Y-%m-%d")
 
     if run:
@@ -851,8 +861,7 @@ def main() -> None:
 
             if failures:
                 st.warning(f"Failed enrichments: {len(failures)}")
-                st.code("
-".join(failures[:50]))
+                st.code("\n".join(failures[:50]))
                 status.update(label="Completed with some errors", state="error")
             else:
                 status.update(label="Refresh complete", state="complete")
