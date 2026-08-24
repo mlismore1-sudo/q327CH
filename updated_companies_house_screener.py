@@ -442,7 +442,9 @@ def get_all_officers(client: CHClient, company_number: str) -> List[Dict[str, An
 
 
 def get_all_pscs(client: CHClient, company_number: str) -> List[Dict[str, Any]]:
-    return paged_get_items(client, f"/company/{company_number}/persons-with-significant-control", PSC_PAGE_SIZE)
+    return paged_get_items(
+        client, f"/company/{company_number}/persons-with-significant-control", PSC_PAGE_SIZE
+    )
 
 
 def collect_international_director_details(
@@ -468,7 +470,9 @@ def collect_international_director_details(
     return bool(deduped), deduped, director_count
 
 
-def analyse_psc_flags(client: CHClient, company_number: str) -> Tuple[bool, List[str], bool, List[str]]:
+def analyse_psc_flags(
+    client: CHClient, company_number: str
+) -> Tuple[bool, List[str], bool, List[str]]:
     pscs = get_all_pscs(client, company_number)
     shareholder_matches: List[str] = []
     owner_names: List[str] = []
@@ -534,8 +538,14 @@ def build_target_indicators(
     if target_address:
         indicators.append("🏠")
     flags = extract_country_flags(director_details) + extract_country_flags(shareholder_details)
-    flags = dedupe_preserve_order(flags)
-    indicators.extend(flags)
+    # Emoji-safe dedupe for flags
+    unique_flags: List[str] = []
+    seen_flags = set()
+    for f in flags:
+        if f and f not in seen_flags:
+            seen_flags.add(f)
+            unique_flags.append(f)
+    indicators.extend(unique_flags)
     if director_count >= 2:
         num = min(director_count, 10)
         number_emojis = {
@@ -661,7 +671,14 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
         labels.extend(shareholder_flags)
         if owner_detail_str.startswith("✓"):
             labels.append("🏢")
-        signal_labels.append(" ".join(dedupe_preserve_order(labels)))
+        # Emoji-safe dedupe for Signals
+        unique_labels: List[str] = []
+        seen_labels = set()
+        for lbl in labels:
+            if lbl and lbl not in seen_labels:
+                seen_labels.add(lbl)
+                unique_labels.append(lbl)
+        signal_labels.append(" ".join(unique_labels))
 
         director_flag = bool(director_flags)
         shareholder_flag = bool(shareholder_flags)
