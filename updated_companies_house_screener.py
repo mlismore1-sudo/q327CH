@@ -204,6 +204,18 @@ def format_flagged_countries(values: List[str]) -> str:
     return " | ".join(parts)
 
 
+def extract_country_flags(values: List[str]) -> List[str]:
+    canonical_values = dedupe_preserve_order([
+        canonical_country_from_value(v) for v in values if canonical_country_from_value(v)
+    ])
+    flags: List[str] = []
+    for v in canonical_values:
+        flag = COUNTRY_FLAG_MAP.get(v)
+        if flag:
+            flags.append(flag)
+    return flags
+
+
 def make_company_profile_url(company_number: str, company_name: str) -> str:
     safe_name = quote(company_name or "company")
     return f"https://find-and-update.company-information.service.gov.uk/company/{company_number}#{safe_name}"
@@ -282,6 +294,9 @@ def init_db() -> sqlite3.Connection:
     ensure_column(conn, "screened_companies", "profile_url", "TEXT")
     ensure_column(conn, "screened_companies", "shortlisted", "INTEGER DEFAULT 0")
     ensure_column(conn, "screened_companies", "target_sic", "INTEGER DEFAULT 0")
+    ensure_column(conn, "screened_companies", "target_address", "INTEGER DEFAULT 0")
+    ensure_column(conn, "screened_companies", "target_address_detail", "TEXT")
+    ensure_column(conn, "screened_companies", "target_indicators", "TEXT")
     return conn
 
 
@@ -309,8 +324,9 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
             international_director, international_director_detail,
             international_shareholder, international_shareholder_detail,
             owned_by_company, owner_company_name,
-            pulled_at, raw_json, profile_url, shortlisted, target_sic
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            pulled_at, raw_json, profile_url, shortlisted, target_sic,
+            target_address, target_address_detail, target_indicators
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row["company_number"],
@@ -329,6 +345,9 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
             row.get("profile_url", ""),
             int(row.get("shortlisted", False)),
             int(row.get("target_sic", False)),
+            int(row.get("target_address", False)),
+            row.get("target_address_detail", ""),
+            row.get("target_indicators", ""),
         ),
     )
     conn.commit()
@@ -400,7 +419,7 @@ def search_new_companies(client: CHClient, target_date: str) -> Tuple[List[Dict[
         if not is_allowed_company_type(item.get("company_type", "")):
             continue
         filtered.append(item)
-    deduped = {}
+    deduped: Dict[str, Dict[str, Any]] = {}
     for item in filtered:
         number = item.get("company_number")
         if number:
@@ -423,13 +442,18 @@ def get_all_pscs(client: CHClient, company_number: str) -> List[Dict[str, Any]]:
     return paged_get_items(client, f"/company/{company_number}/persons-with-significant-control", PSC_PAGE_SIZE)
 
 
-def collect_international_director_details(client: CHClient, company_number: str) -> Tuple[bool, List[str]]:
+def collect_international_director_details(
+    client: CHClient, company_number: str
+) -> Tuple[bool, List[str], int]:
     officers = get_all_officers(client, company_number)
     matches: List[str] = []
+    director_count = 0
     for officer in officers:
         role = normalize_text(officer.get("officer_role"))
-        if "director" not in role and role != "designated member":
+        is_director = "director" in role or role == "designated member"
+        if not is_director:
             continue
+        director_count += 1
         for value in [
             officer.get("country_of_residence"),
             (officer.get("address") or {}).get("country"),
@@ -438,7 +462,7 @@ def collect_international_director_details(client: CHClient, company_number: str
             if canonical_country_from_value(value):
                 matches.append(str(value))
     deduped = dedupe_preserve_order(matches)
-    return bool(deduped), deduped
+    return bool(deduped), deduped, director_count
 
 
 def analyse_psc_flags(client: CHClient, company_number: str) -> Tuple[bool, List[str], bool, List[str]]:
@@ -479,6 +503,55 @@ def has_bonus_star(values: List[str]) -> bool:
     return bool(canonical_values & BONUS_STAR_COUNTRIES)
 
 
+def get_registered_address(item: Dict[str, Any]) -> Dict[str, Any]:
+    return item.get("registered_office_address") or item.get("address") or {}
+
+
+def is_target_address(item: Dict[str, Any]) -> Tuple[bool, str]:
+    address = get_registered_address(item)
+    country = canonical_country_from_value(address.get("country")) if address else ""
+    if country:
+        flag = COUNTRY_FLAG_MAP.get(country, "🏠")
+        detail = f"✓ {flag} {country_label(country)}"
+        return True, detail
+    return False, ""
+
+
+def build_target_indicators(
+    target_sic: bool,
+    target_address: bool,
+    address_detail: str,
+    director_details: List[str],
+    shareholder_details: List[str],
+    director_count: int,
+) -> str:
+    indicators: List[str] = []
+    if target_sic:
+        indicators.append("🎯")  # 🎯
+    if target_address:
+        indicators.append("🏠")  # 🏠
+    flags = extract_country_flags(director_details) + extract_country_flags(shareholder_details)
+    flags = dedupe_preserve_order(flags)
+    indicators.extend(flags)
+    if director_count >= 2:
+        num = min(director_count, 10)
+        number_emojis = {
+            0: "0️⃣",
+            1: "1️⃣",
+            2: "2️⃣",
+            3: "3️⃣",
+            4: "4️⃣",
+            5: "5️⃣",
+            6: "6️⃣",
+            7: "7️⃣",
+            8: "8️⃣",
+            9: "9️⃣",
+            10: "🔟",  # 🔟
+        }
+        indicators.append(number_emojis.get(num, "#️⃣"))
+    return " ".join(indicators)
+
+
 def build_rating(
     international_director: bool,
     international_shareholder: bool,
@@ -498,16 +571,29 @@ def build_rating(
         stars += 1
     if has_bonus_star(director_details) or has_bonus_star(shareholder_details):
         stars += 1
-    return "⭐" * stars
+    return "⭐" * stars  # ⭐
 
 
 def process_company(client: CHClient, item: Dict[str, Any], target_date: str) -> Dict[str, Any]:
     company_number = item.get("company_number", "")
     company_name = item.get("company_name") or item.get("title") or ""
-    international_director, director_details = collect_international_director_details(client, company_number)
-    international_shareholder, shareholder_details, owned_by_company, owner_names = analyse_psc_flags(client, company_number)
+    international_director, director_details, director_count = collect_international_director_details(
+        client, company_number
+    )
+    international_shareholder, shareholder_details, owned_by_company, owner_names = analyse_psc_flags(
+        client, company_number
+    )
     target_sic = is_target_sic(item)
+    target_address, target_address_detail = is_target_address(item)
     owner_display = " | ".join([f"✓ {name}" for name in owner_names]) if owner_names else ""
+    target_indicators = build_target_indicators(
+        target_sic=target_sic,
+        target_address=target_address,
+        address_detail=target_address_detail,
+        director_details=director_details,
+        shareholder_details=shareholder_details,
+        director_count=director_count,
+    )
     return {
         "company_number": company_number,
         "company_name": company_name,
@@ -525,38 +611,48 @@ def process_company(client: CHClient, item: Dict[str, Any], target_date: str) ->
         "profile_url": make_company_profile_url(company_number, company_name),
         "shortlisted": False,
         "target_sic": target_sic,
+        "target_address": target_address,
+        "target_address_detail": target_address_detail,
+        "target_indicators": target_indicators,
     }
 
 
 def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
     if db_df.empty:
         return pd.DataFrame(columns=[
-            "Shortlist", "Target SIC", "Rating", "Company Name", "SIC Code", "Signals",
+            "Shortlist", "Target SIC", "Rating", "Target Indicators", "Company Name", "SIC Code", "Signals",
             "International Director", "International Shareholder", "Owned By A Company",
             "Profile", "Pulled At", "company_number",
         ])
 
-    signal_labels = []
-    rating_series = []
+    signal_labels: List[str] = []
+    rating_series: List[str] = []
     target_sic_series = db_df.get("target_sic", pd.Series(0, index=db_df.index)).fillna(0).astype(int).astype(bool)
+    target_indicators_series = db_df.get("target_indicators", pd.Series("", index=db_df.index)).fillna("")
 
     for idx, row in db_df.iterrows():
-        labels = []
-        director_flag = bool(int(row.get("international_director", 0) or 0))
-        shareholder_flag = bool(int(row.get("international_shareholder", 0) or 0))
-        owner_flag = bool(int(row.get("owned_by_company", 0) or 0))
+        director_detail_str = str(row.get("international_director_detail", "")).strip()
+        shareholder_detail_str = str(row.get("international_shareholder_detail", "")).strip()
+        owner_detail_str = str(row.get("owner_company_name", "")).strip()
+
+        director_detail_values = [x.strip() for x in director_detail_str.split("|") if x.strip()]
+        shareholder_detail_values = [x.strip() for x in shareholder_detail_str.split("|") if x.strip()]
+
+        director_flags = extract_country_flags(director_detail_values)
+        shareholder_flags = extract_country_flags(shareholder_detail_values)
+
+        labels: List[str] = []
+        labels.extend(director_flags)
+        labels.extend(shareholder_flags)
+        if owner_detail_str.startswith("✓"):
+            labels.append("🏢")  # 🏢
+        signal_labels.append(" ".join(dedupe_preserve_order(labels)))
+
+        director_flag = bool(director_flags)
+        shareholder_flag = bool(shareholder_flags)
+        owner_flag = owner_detail_str.startswith("✓")
         target_flag = bool(target_sic_series.loc[idx])
 
-        if director_flag:
-            labels.append("Director 🌍")
-        if shareholder_flag:
-            labels.append("Shareholder 🌍")
-        if owner_flag:
-            labels.append("Company owner 🏢")
-        signal_labels.append(" · ".join(labels))
-
-        director_detail_values = [x.strip() for x in str(row.get("international_director_detail", "")).split("|") if x.strip()]
-        shareholder_detail_values = [x.strip() for x in str(row.get("international_shareholder_detail", "")).split("|") if x.strip()]
         rating_series.append(
             build_rating(
                 international_director=director_flag,
@@ -570,8 +666,9 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame({
         "Shortlist": db_df.get("shortlisted", pd.Series(0, index=db_df.index)).fillna(0).astype(int).astype(bool),
-        "Target SIC": target_sic_series.map(lambda x: "🎯" if x else ""),
+        "Target SIC": target_sic_series.map(lambda x: "🎯" if x else ""),  # 🎯
         "Rating": rating_series,
+        "Target Indicators": target_indicators_series,
         "Company Name": db_df["company_name"],
         "SIC Code": db_df["sic_code"],
         "Signals": signal_labels,
@@ -584,7 +681,14 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
     })
 
 
-def apply_filters(df: pd.DataFrame, only_flagged: bool, selected_signals: List[str], sic_search: str, company_name_search: str, shortlisted_only: bool) -> pd.DataFrame:
+def apply_filters(
+    df: pd.DataFrame,
+    only_flagged: bool,
+    selected_signals: List[str],
+    sic_search: str,
+    company_name_search: str,
+    shortlisted_only: bool,
+) -> pd.DataFrame:
     filtered = df.copy()
     if shortlisted_only and "Shortlist" in filtered.columns:
         filtered = filtered[filtered["Shortlist"] == True].copy()
@@ -598,21 +702,45 @@ def apply_filters(df: pd.DataFrame, only_flagged: bool, selected_signals: List[s
             mask |= filtered["Owned By A Company"].astype(str).str.startswith("✓", na=False)
         filtered = filtered[mask].copy()
     if sic_search.strip():
-        filtered = filtered[filtered["SIC Code"].astype(str).str.contains(re.escape(sic_search.strip()), case=False, na=False)].copy()
+        filtered = filtered[
+            filtered["SIC Code"].astype(str).str.contains(re.escape(sic_search.strip()), case=False, na=False)
+        ].copy()
     if company_name_search.strip():
-        filtered = filtered[filtered["Company Name"].astype(str).str.contains(re.escape(company_name_search.strip()), case=False, na=False)].copy()
+        filtered = filtered[
+            filtered["Company Name"].astype(str).str.contains(re.escape(company_name_search.strip()), case=False, na=False)
+        ].copy()
     return filtered
 
 
 def render_kpis(display_df: pd.DataFrame) -> None:
     total = len(display_df)
-    director = int(display_df["International Director"].astype(str).str.startswith("✓", na=False).sum()) if not display_df.empty else 0
-    shareholder = int(display_df["International Shareholder"].astype(str).str.startswith("✓", na=False).sum()) if not display_df.empty else 0
-    flagged = int(((display_df["International Director"].astype(str).str.startswith("✓", na=False)) |
-                   (display_df["International Shareholder"].astype(str).str.startswith("✓", na=False)) |
-                   (display_df["Owned By A Company"].astype(str).str.startswith("✓", na=False))).sum()) if not display_df.empty else 0
+    director = (
+        int(display_df["International Director"].astype(str).str.startswith("✓", na=False).sum())
+        if not display_df.empty
+        else 0
+    )
+    shareholder = (
+        int(display_df["International Shareholder"].astype(str).str.startswith("✓", na=False).sum())
+        if not display_df.empty
+        else 0
+    )
+    flagged = (
+        int(
+            (
+                display_df["International Director"].astype(str).str.startswith("✓", na=False)
+                | display_df["International Shareholder"].astype(str).str.startswith("✓", na=False)
+                | display_df["Owned By A Company"].astype(str).str.startswith("✓", na=False)
+            ).sum()
+        )
+        if not display_df.empty
+        else 0
+    )
     shortlisted = int(display_df["Shortlist"].sum()) if not display_df.empty else 0
-    target_sics = int(display_df["Target SIC"].astype(str).eq("🎯").sum()) if not display_df.empty else 0
+    target_sics = (
+        int(display_df["Target SIC"].astype(str).eq("🎯").sum())  # 🎯
+        if not display_df.empty
+        else 0
+    )
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Total Results", f"{total:,}")
@@ -643,7 +771,9 @@ def render_sidebar(default_date: date) -> Tuple[date, bool, List[str], str, str,
 def main() -> None:
     apply_custom_css()
     st.title("Companies House New Incorporations Screener")
-    st.caption("Pull newly incorporated active companies, screen target SIC codes, and enrich results with officer and PSC checks.")
+    st.caption(
+        "Pull newly incorporated active companies, screen target SIC codes, and enrich results with officer and PSC checks."
+    )
 
     st.markdown(
         """
@@ -655,7 +785,11 @@ def main() -> None:
     )
 
     with st.expander("Secrets format", expanded=False):
-        st.code('COMPANIES_HOUSE_API_KEYS = [\n  "key-1",\n  "key-2",\n  "key-3"\n]', language="toml")
+        st.code('COMPANIES_HOUSE_API_KEYS = [
+  "key-1",
+  "key-2",
+  "key-3"
+]', language="toml")
 
     try:
         api_keys = validate_api_keys()
@@ -666,7 +800,9 @@ def main() -> None:
     conn = init_db()
     client = CHClient(api_keys)
 
-    target_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only = render_sidebar(date.today())
+    target_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only = render_sidebar(
+        date.today()
+    )
     date_str = target_date.strftime("%Y-%m-%d")
 
     if run:
@@ -695,7 +831,8 @@ def main() -> None:
 
             if failures:
                 st.warning(f"Failed enrichments: {len(failures)}")
-                st.code("\n".join(failures[:50]))
+                st.code("
+".join(failures[:50]))
                 status.update(label="Completed with some errors", state="error")
             else:
                 status.update(label="Refresh complete", state="complete")
@@ -707,10 +844,10 @@ def main() -> None:
     st.markdown(
         """
         <div class="signal-legend">
-            <div class="signal-pill">Director 🌍 = international director match</div>
-            <div class="signal-pill">Shareholder 🌍 = international PSC match</div>
-            <div class="signal-pill">Company owner 🏢 = corporate PSC match</div>
-            <div class="signal-pill">Target SIC 🎯 = SIC 62012, 72110, or 56101</div>
+            <div class="signal-pill">Target SIC 🎯</div>
+            <div class="signal-pill">Target Registered Address 🏠</div>
+            <div class="signal-pill">Signals = country flags (director/shareholder based in target countries) + 🏢 for corporate PSCs</div>
+            <div class="signal-pill">Target Indicators = 🎯, 🏠, country flags, and number emoji for 2+ directors</div>
             <div class="signal-pill">Rating ⭐ = 1 star per signal, plus a bonus for Sweden, Norway, or USA director/shareholder</div>
         </div>
         """,
@@ -730,10 +867,12 @@ def main() -> None:
 
     with tab_results:
         st.subheader("Results")
-        st.caption(f"Loaded {len(api_keys)} API key(s) for {date_str}. {len(filtered_df):,} rows currently visible after filters.")
+        st.caption(
+            f"Loaded {len(api_keys)} API key(s) for {date_str}. {len(filtered_df):,} rows currently visible after filters."
+        )
 
         editor_df = filtered_df[[
-            "Shortlist", "Target SIC", "Rating", "Company Name", "SIC Code", "Signals",
+            "Shortlist", "Target SIC", "Rating", "Target Indicators", "Company Name", "SIC Code", "Signals",
             "International Director", "International Shareholder", "Owned By A Company",
             "Profile", "Pulled At", "company_number",
         ]].copy()
@@ -743,20 +882,41 @@ def main() -> None:
             use_container_width=True,
             hide_index=True,
             disabled=[
-                "Target SIC", "Rating", "Company Name", "SIC Code", "Signals",
+                "Target SIC", "Rating", "Target Indicators", "Company Name", "SIC Code", "Signals",
                 "International Director", "International Shareholder", "Owned By A Company",
                 "Profile", "Pulled At", "company_number",
             ],
             column_config={
-                "Shortlist": st.column_config.CheckboxColumn("Shortlist", help="Tick to mark this company for follow-up."),
-                "Target SIC": st.column_config.TextColumn("Target SIC", width="small", help="Automatically marked 🎯 when SIC includes 62012, 72110, or 56101."),
-                "Rating": st.column_config.TextColumn("Rating", width="small", help="⭐ for each matched signal, plus a bonus ⭐ for Sweden, Norway, or USA director/shareholder."),
+                "Shortlist": st.column_config.CheckboxColumn(
+                    "Shortlist", help="Tick to mark this company for follow-up."
+                ),
+                "Target SIC": st.column_config.TextColumn(
+                    "Target SIC",
+                    width="small",
+                    help="Automatically marked 🎯 when SIC includes 62012, 72110, or 56101.",
+                ),
+                "Rating": st.column_config.TextColumn(
+                    "Rating",
+                    width="small",
+                    help="⭐ for each matched signal, plus a bonus ⭐ for Sweden, Norway, or USA director/shareholder.",
+                ),
+                "Target Indicators": st.column_config.TextColumn(
+                    "Target Indicators",
+                    width="medium",
+                    help="🎯 Target SIC, 🏠 Target Registered Address, country flags for director/shareholder based in target countries, numeric emoji for 2+ directors.",
+                ),
                 "Company Name": st.column_config.TextColumn("Company Name", width="large"),
                 "SIC Code": st.column_config.TextColumn("SIC Code", width="small"),
                 "Signals": st.column_config.TextColumn("Signals", width="medium"),
-                "International Director": st.column_config.TextColumn("International Director", width="large"),
-                "International Shareholder": st.column_config.TextColumn("International Shareholder", width="large"),
-                "Owned By A Company": st.column_config.TextColumn("Owned By A Company", width="large"),
+                "International Director": st.column_config.TextColumn(
+                    "International Director", width="large"
+                ),
+                "International Shareholder": st.column_config.TextColumn(
+                    "International Shareholder", width="large"
+                ),
+                "Owned By A Company": st.column_config.TextColumn(
+                    "Owned By A Company", width="large"
+                ),
                 "Profile": st.column_config.LinkColumn("Profile", display_text="Open record", width="small"),
                 "Pulled At": st.column_config.TextColumn("Pulled At", width="medium"),
                 "company_number": None,
@@ -775,7 +935,9 @@ def main() -> None:
             for _, row in changed_rows.iterrows():
                 set_shortlisted_state(conn, row["company_number"], bool(row["Shortlist_new"]))
             if not changed_rows.empty:
-                st.success(f"Updated shortlist state for {len(changed_rows)} compan{'y' if len(changed_rows) == 1 else 'ies'}.")
+                st.success(
+                    f"Updated shortlist state for {len(changed_rows)} compan{'y' if len(changed_rows) == 1 else 'ies'}."
+                )
                 st.rerun()
 
         csv = filtered_df.drop(columns=["company_number"], errors="ignore").to_csv(index=False).encode("utf-8")
@@ -791,7 +953,9 @@ def main() -> None:
         st.subheader("Shortlist")
         shortlist_df = display_df[display_df["Shortlist"] == True].copy()
         if shortlist_df.empty:
-            st.info("No shortlisted companies yet. Tick the shortlist checkbox in the Results tab to build a follow-up queue.")
+            st.info(
+                "No shortlisted companies yet. Tick the shortlist checkbox in the Results tab to build a follow-up queue."
+            )
         else:
             st.dataframe(
                 shortlist_df.drop(columns=["company_number"], errors="ignore"),
@@ -799,7 +963,9 @@ def main() -> None:
                 hide_index=True,
                 column_config={"Profile": st.column_config.LinkColumn("Profile", display_text="Open record")},
             )
-            shortlist_csv = shortlist_df.drop(columns=["company_number"], errors="ignore").to_csv(index=False).encode("utf-8")
+            shortlist_csv = shortlist_df.drop(columns=["company_number"], errors="ignore").to_csv(index=False).encode(
+                "utf-8"
+            )
             st.download_button(
                 "Download shortlist CSV",
                 data=shortlist_csv,
@@ -820,7 +986,7 @@ def main() -> None:
 - Officers page size: {OFFICERS_PAGE_SIZE}
 - PSC page size: {PSC_PAGE_SIZE}
 - Dedupe rule: company numbers already screened for the selected incorporation date are skipped
-- UI enhancements: sidebar filters, KPI cards, workflow tabs, clickable profile links, shortlist workflow, target SIC tagging, rating column
+- UI enhancements: sidebar filters, KPI cards, workflow tabs, clickable profile links, shortlist workflow, target SIC tagging, rating column, target indicators column, emoji-only Signals column
             """
         )
         st.write("Selected signals for current filter:", ", ".join(selected_signals) if selected_signals else "None")
