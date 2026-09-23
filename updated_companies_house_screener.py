@@ -157,6 +157,16 @@ def make_company_profile_url(company_number: str, company_name: str) -> str:
     return f"https://find-and-update.company-information.service.gov.uk/company/{company_number}#{quote(company_name or 'company')}"
 
 
+def make_google_funding_search_url(company_name: str) -> str:
+    clean_name = re.sub(
+        r"\s+(?:ltd|limited)\.?\s*$",
+        "",
+        str(company_name or ""),
+        flags=re.IGNORECASE,
+    ).strip()
+    return f"https://www.google.com/search?q={quote(f'{clean_name} funding')}"
+
+
 class CHClient:
     def __init__(self, api_keys: List[str]):
         self.api_keys = [key.strip() for key in api_keys if str(key).strip()]
@@ -445,7 +455,11 @@ def process_company(client: CHClient, item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
-    columns = ["Shortlist", "Incorporation Date", "Target SIC", "Rating", "Target Indicators", "Company Name", "SIC Code", "Signals", "International Director", "International Shareholder", "Owned By A Company", "Profile", "Pulled At", "company_number"]
+    columns = [
+        "Company Name", "Google Funding Search", "Shortlist", "Incorporation Date", "Target SIC", "Rating",
+        "Target Indicators", "SIC Code", "Signals", "International Director", "International Shareholder",
+        "Owned By A Company", "Profile", "Pulled At", "company_number",
+    ]
     if db_df.empty:
         return pd.DataFrame(columns=columns)
     rows = []
@@ -458,13 +472,15 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
                 signals.append(flag)
         if str(row.get("owner_company_name", "")).startswith("✓"):
             signals.append("🏢")
+        company_name = row.get("company_name", "")
         rows.append({
+            "Company Name": company_name,
+            "Google Funding Search": make_google_funding_search_url(company_name),
             "Shortlist": bool(row.get("shortlisted", 0)),
             "Incorporation Date": row.get("incorporation_date", ""),
             "Target SIC": "🎯" if bool(row.get("target_sic", 0)) else "",
             "Rating": build_rating(bool(extract_country_flags(director_values)), bool(extract_country_flags(shareholder_values)), str(row.get("owner_company_name", "")).startswith("✓"), bool(row.get("target_sic", 0)), director_values, shareholder_values),
             "Target Indicators": row.get("target_indicators", ""),
-            "Company Name": row.get("company_name", ""),
             "SIC Code": row.get("sic_code", ""),
             "Signals": " ".join(signals),
             "International Director": row.get("international_director_detail", ""),
@@ -589,13 +605,20 @@ def main() -> None:
     with tab_results:
         st.subheader("Results")
         st.caption(f"Loaded {len(api_keys)} API key(s) for {range_label}. {len(filtered_df):,} rows currently visible after filters.")
-        editable_columns = ["Shortlist", "Incorporation Date", "Target SIC", "Rating", "Target Indicators", "Company Name", "SIC Code", "Signals", "International Director", "International Shareholder", "Owned By A Company", "Profile", "Pulled At", "company_number"]
+        editable_columns = [
+            "Company Name", "Google Funding Search", "Shortlist", "Incorporation Date", "Target SIC", "Rating",
+            "Target Indicators", "SIC Code", "Signals", "International Director", "International Shareholder",
+            "Owned By A Company", "Profile", "Pulled At", "company_number",
+        ]
         editor_df = filtered_df[editable_columns].copy()
         edited_df = st.data_editor(
-            editor_df, use_container_width=True, hide_index=True,
+            editor_df,
+            use_container_width=True,
+            hide_index=True,
             disabled=[column for column in editable_columns if column not in {"Shortlist"}],
             column_config={
                 "Shortlist": st.column_config.CheckboxColumn("Shortlist"),
+                "Google Funding Search": st.column_config.LinkColumn("Google Funding Search", display_text="Search funding"),
                 "Profile": st.column_config.LinkColumn("Profile", display_text="Open record"),
                 "company_number": None,
             },
@@ -615,7 +638,15 @@ def main() -> None:
         if shortlist_df.empty:
             st.info("No shortlisted companies yet. Tick the shortlist checkbox in the Results tab to build a follow-up queue.")
         else:
-            st.dataframe(shortlist_df.drop(columns=["company_number"], errors="ignore"), use_container_width=True, hide_index=True, column_config={"Profile": st.column_config.LinkColumn("Profile", display_text="Open record")})
+            st.dataframe(
+                shortlist_df.drop(columns=["company_number"], errors="ignore"),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Google Funding Search": st.column_config.LinkColumn("Google Funding Search", display_text="Search funding"),
+                    "Profile": st.column_config.LinkColumn("Profile", display_text="Open record"),
+                },
+            )
             st.download_button("Download shortlist CSV", shortlist_df.drop(columns=["company_number"], errors="ignore").to_csv(index=False).encode("utf-8"), f"companies_house_shortlist_{start_date_str}_{end_date_str}.csv", "text/csv", use_container_width=True)
 
     with tab_settings:
