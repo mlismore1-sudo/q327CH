@@ -48,12 +48,6 @@ COUNTRY_TERMS = {
     "sweden", "finland", "denmark", "austria", "poland", "spain", "portugal", "greece", "italy",
     "hungary", "croatia", "ireland", "china", "netherlands", "india", "hong kong", "singapore",
 }
-NATIONALITY_TERMS = {
-    "american", "us", "united states", "united states of america", "french", "german", "belgian",
-    "norwegian", "swedish", "finnish", "danish", "austrian", "polish", "spanish", "portuguese",
-    "greek", "italian", "hungarian", "croatian", "irish", "chinese", "indian", "hong kong",
-    "hongkong", "singaporean", "dutch", "netherlands",
-}
 COMPANY_OWNER_KINDS = {
     "corporate-entity-person-with-significant-control",
     "legal-person-person-with-significant-control",
@@ -77,6 +71,13 @@ NATIONALITY_TO_COUNTRY = {
     "singaporean": "singapore", "dutch": "netherlands", "netherlands": "netherlands",
 }
 SIGNAL_OPTIONS = ["International Director", "International Shareholder", "Owned By A Company"]
+CHECKBOX_COLUMNS = ["Funding secured?", "NAB'd", "Owned by B/J", "Shortlist"]
+DB_CHECKBOX_COLUMNS = {
+    "Funding secured?": "funding_secured",
+    "NAB'd": "nabd",
+    "Owned by B/J": "owned_by_bj",
+    "Shortlist": "shortlisted",
+}
 
 
 def apply_custom_css() -> None:
@@ -88,8 +89,6 @@ def apply_custom_css() -> None:
             background: linear-gradient(180deg, rgba(14, 17, 23, 0.03), rgba(14, 17, 23, 0.01));
             border: 1px solid rgba(120, 120, 120, 0.18); padding: 14px 16px; border-radius: 14px;
         }
-        .signal-legend { display: flex; gap: 10px; flex-wrap: wrap; margin: 0.5rem 0 0.25rem 0; }
-        .signal-pill { border: 1px solid rgba(120, 120, 120, 0.2); border-radius: 999px; padding: 6px 10px; font-size: 0.85rem; background: rgba(49, 51, 63, 0.04); }
         .app-note { padding: 0.85rem 1rem; border-radius: 12px; border: 1px solid rgba(120, 120, 120, 0.18); background: rgba(49, 51, 63, 0.04); margin-bottom: 1rem; }
         </style>
         """,
@@ -120,19 +119,19 @@ def canonical_country_from_value(value: Any) -> str:
     if not norm:
         return ""
     if norm in NORMALIZED_COUNTRY_TERMS:
-        return "united states" if norm == "usa" else norm
+        return norm
     return NATIONALITY_TO_COUNTRY.get(norm, "")
 
 
 def dedupe_preserve_order(values: List[str]) -> List[str]:
-    out: List[str] = []
+    output: List[str] = []
     seen = set()
     for value in values:
         norm = normalize_text(value)
         if norm and norm not in seen:
             seen.add(norm)
-            out.append(value)
-    return out
+            output.append(value)
+    return output
 
 
 def country_label(value: str) -> str:
@@ -144,12 +143,12 @@ def country_label(value: str) -> str:
 
 
 def format_flagged_countries(values: List[str]) -> str:
-    countries = dedupe_preserve_order([canonical_country_from_value(v) for v in values if canonical_country_from_value(v)])
+    countries = dedupe_preserve_order([canonical_country_from_value(v) for v in values])
     return " | ".join(f"✓ {COUNTRY_FLAG_MAP.get(v, '🌍')} {country_label(v)}" for v in countries)
 
 
 def extract_country_flags(values: List[str]) -> List[str]:
-    countries = dedupe_preserve_order([canonical_country_from_value(v) for v in values if canonical_country_from_value(v)])
+    countries = dedupe_preserve_order([canonical_country_from_value(v) for v in values])
     return [COUNTRY_FLAG_MAP[v] for v in countries if v in COUNTRY_FLAG_MAP]
 
 
@@ -158,12 +157,7 @@ def make_company_profile_url(company_number: str, company_name: str) -> str:
 
 
 def make_google_funding_search_url(company_name: str) -> str:
-    clean_name = re.sub(
-        r"\s+(?:ltd|limited)\.?\s*$",
-        "",
-        str(company_name or ""),
-        flags=re.IGNORECASE,
-    ).strip()
+    clean_name = re.sub(r"\s+(?:ltd|limited)\.?\s*$", "", str(company_name or ""), flags=re.IGNORECASE).strip()
     return f"https://www.google.com/search?q={quote(f'{clean_name} funding')}"
 
 
@@ -185,10 +179,7 @@ class CHClient:
         last_error = "Unknown error"
         for _ in range(max(len(self.api_keys) * 3, 3)):
             try:
-                response = self.session.get(
-                    f"{BASE_URL}{path}", params=params, auth=self._auth(), timeout=30,
-                    headers={"Accept": "application/json"},
-                )
+                response = self.session.get(f"{BASE_URL}{path}", params=params, auth=self._auth(), timeout=30, headers={"Accept": "application/json"})
                 if response.status_code == 404:
                     return {}
                 if response.status_code in (401, 403, 429):
@@ -226,7 +217,19 @@ def init_db() -> sqlite3.Connection:
             international_shareholder INTEGER,
             owned_by_company INTEGER,
             pulled_at TEXT,
-            raw_json TEXT
+            raw_json TEXT,
+            international_director_detail TEXT,
+            international_shareholder_detail TEXT,
+            owner_company_name TEXT,
+            profile_url TEXT,
+            shortlisted INTEGER DEFAULT 0,
+            target_sic INTEGER DEFAULT 0,
+            target_address INTEGER DEFAULT 0,
+            target_address_detail TEXT,
+            target_indicators TEXT,
+            funding_secured INTEGER DEFAULT 0,
+            nabd INTEGER DEFAULT 0,
+            owned_by_bj INTEGER DEFAULT 0
         )
         """
     )
@@ -240,23 +243,32 @@ def init_db() -> sqlite3.Connection:
     ensure_column(conn, "screened_companies", "target_address", "INTEGER DEFAULT 0")
     ensure_column(conn, "screened_companies", "target_address_detail", "TEXT")
     ensure_column(conn, "screened_companies", "target_indicators", "TEXT")
+    ensure_column(conn, "screened_companies", "funding_secured", "INTEGER DEFAULT 0")
+    ensure_column(conn, "screened_companies", "nabd", "INTEGER DEFAULT 0")
+    ensure_column(conn, "screened_companies", "owned_by_bj", "INTEGER DEFAULT 0")
     return conn
 
 
 def existing_company_numbers(conn: sqlite3.Connection, start_date: str, end_date: str) -> set:
-    rows = conn.execute(
-        "SELECT company_number FROM screened_companies WHERE incorporation_date BETWEEN ? AND ?",
-        (start_date, end_date),
-    ).fetchall()
+    rows = conn.execute("SELECT company_number FROM screened_companies WHERE incorporation_date BETWEEN ? AND ?", (start_date, end_date)).fetchall()
     return {row[0] for row in rows}
 
 
-def set_shortlisted_state(conn: sqlite3.Connection, company_number: str, shortlisted: bool) -> None:
-    conn.execute("UPDATE screened_companies SET shortlisted = ? WHERE company_number = ?", (int(shortlisted), company_number))
+def set_company_checkbox_state(conn: sqlite3.Connection, company_number: str, column: str, checked: bool) -> None:
+    if column not in DB_CHECKBOX_COLUMNS.values():
+        raise ValueError(f"Unsupported checkbox database column: {column}")
+    conn.execute(f"UPDATE screened_companies SET {column} = ? WHERE company_number = ?", (int(checked), company_number))
     conn.commit()
 
 
 def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
+    existing = conn.execute("SELECT shortlisted, funding_secured, nabd, owned_by_bj FROM screened_companies WHERE company_number = ?", (row["company_number"],)).fetchone()
+    preserved = {
+        "shortlisted": existing[0] if existing else int(row.get("shortlisted", False)),
+        "funding_secured": existing[1] if existing else int(row.get("funding_secured", False)),
+        "nabd": existing[2] if existing else int(row.get("nabd", False)),
+        "owned_by_bj": existing[3] if existing else int(row.get("owned_by_bj", False)),
+    }
     conn.execute(
         """
         INSERT OR REPLACE INTO screened_companies (
@@ -265,28 +277,23 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
             international_shareholder, international_shareholder_detail,
             owned_by_company, owner_company_name, pulled_at, raw_json,
             profile_url, shortlisted, target_sic, target_address,
-            target_address_detail, target_indicators
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            target_address_detail, target_indicators, funding_secured, nabd, owned_by_bj
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row["company_number"], row["company_name"], row["sic_code"], row["incorporation_date"], row["company_type"],
             int(row["international_director"]), row.get("international_director_detail", ""),
             int(row["international_shareholder"]), row.get("international_shareholder_detail", ""),
-            int(row["owned_by_company"]), row.get("owner_company_name", ""), row["pulled_at"],
-            json.dumps(row.get("raw_json", {})), row.get("profile_url", ""), int(row.get("shortlisted", False)),
-            int(row.get("target_sic", False)), int(row.get("target_address", False)),
-            row.get("target_address_detail", ""), row.get("target_indicators", ""),
+            int(row["owned_by_company"]), row.get("owner_company_name", ""), row["pulled_at"], json.dumps(row.get("raw_json", {})),
+            row.get("profile_url", ""), preserved["shortlisted"], int(row.get("target_sic", False)), int(row.get("target_address", False)),
+            row.get("target_address_detail", ""), row.get("target_indicators", ""), preserved["funding_secured"], preserved["nabd"], preserved["owned_by_bj"],
         ),
     )
     conn.commit()
 
 
 def read_db_rows(conn: sqlite3.Connection, start_date: str, end_date: str) -> pd.DataFrame:
-    return pd.read_sql_query(
-        "SELECT * FROM screened_companies WHERE incorporation_date BETWEEN ? AND ? ORDER BY pulled_at DESC",
-        conn,
-        params=(start_date, end_date),
-    )
+    return pd.read_sql_query("SELECT * FROM screened_companies WHERE incorporation_date BETWEEN ? AND ? ORDER BY pulled_at DESC", conn, params=(start_date, end_date))
 
 
 def validate_api_keys() -> List[str]:
@@ -321,25 +328,11 @@ def is_allowed_company_type(value: Any) -> bool:
 
 
 def search_new_companies(client: CHClient, start_date: str, end_date: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    params = {
-        "incorporated_from": start_date,
-        "incorporated_to": end_date,
-        "company_status": "active",
-        "company_type": ",".join(ALLOWED_COMPANY_TYPES),
-        "sic_codes": ",".join(ALL_ALLOWED_SIC_CODES),
-    }
+    params = {"incorporated_from": start_date, "incorporated_to": end_date, "company_status": "active", "company_type": ",".join(ALLOWED_COMPANY_TYPES), "sic_codes": ",".join(ALL_ALLOWED_SIC_CODES)}
     items = paged_get_items(client, "/advanced-search/companies", SEARCH_PAGE_SIZE, params)
-    filtered = [
-        item for item in items
-        if any(str(code) in ALL_ALLOWED_SIC_CODES for code in (item.get("sic_codes") or []))
-        and item.get("company_status", "").lower() == "active"
-        and is_allowed_company_type(item.get("company_type", ""))
-    ]
+    filtered = [item for item in items if any(str(code) in ALL_ALLOWED_SIC_CODES for code in (item.get("sic_codes") or [])) and item.get("company_status", "").lower() == "active" and is_allowed_company_type(item.get("company_type", ""))]
     deduped = {item["company_number"]: item for item in filtered if item.get("company_number")}
-    return list(deduped.values()), {
-        "raw_results": len(items), "filtered_results": len(filtered), "deduped_results": len(deduped),
-        "company_types_sent": ", ".join(ALLOWED_COMPANY_TYPES), "sic_count": len(ALL_ALLOWED_SIC_CODES),
-    }
+    return list(deduped.values()), {"raw_results": len(items), "filtered_results": len(filtered), "deduped_results": len(deduped), "company_types_sent": ", ".join(ALLOWED_COMPANY_TYPES), "sic_count": len(ALL_ALLOWED_SIC_CODES)}
 
 
 def get_all_officers(client: CHClient, company_number: str) -> List[Dict[str, Any]]:
@@ -377,9 +370,7 @@ def analyse_psc_flags(client: CHClient, company_number: str) -> Tuple[bool, List
             name = str(psc.get("name") or "").strip()
             if name:
                 owner_names.append(name)
-    shareholder_matches = dedupe_preserve_order(shareholder_matches)
-    owner_names = dedupe_preserve_order(owner_names)
-    return bool(shareholder_matches), shareholder_matches, bool(owner_names), owner_names
+    return bool(shareholder_matches), dedupe_preserve_order(shareholder_matches), bool(owner_names), dedupe_preserve_order(owner_names)
 
 
 def parse_matching_sic(item: Dict[str, Any]) -> str:
@@ -398,9 +389,7 @@ def has_bonus_star(values: List[str]) -> bool:
 def is_target_address(item: Dict[str, Any]) -> Tuple[bool, str]:
     address = item.get("registered_office_address") or item.get("address") or {}
     country = canonical_country_from_value(address.get("country"))
-    if country:
-        return True, f"✓ {COUNTRY_FLAG_MAP.get(country, '🏠')} {country_label(country)}"
-    return False, ""
+    return (True, f"✓ {COUNTRY_FLAG_MAP.get(country, '🏠')} {country_label(country)}") if country else (False, "")
 
 
 def build_target_indicators(target_sic: bool, target_address: bool, director_details: List[str], shareholder_details: List[str], director_count: int) -> str:
@@ -431,35 +420,11 @@ def process_company(client: CHClient, item: Dict[str, Any]) -> Dict[str, Any]:
     international_shareholder, shareholder_details, owned_by_company, owner_names = analyse_psc_flags(client, company_number)
     target_sic = is_target_sic(item)
     target_address, target_address_detail = is_target_address(item)
-    return {
-        "company_number": company_number,
-        "company_name": company_name,
-        "sic_code": parse_matching_sic(item),
-        "incorporation_date": item.get("date_of_creation", ""),
-        "company_type": item.get("company_type", ""),
-        "international_director": international_director,
-        "international_director_detail": format_flagged_countries(director_details),
-        "international_shareholder": international_shareholder,
-        "international_shareholder_detail": format_flagged_countries(shareholder_details),
-        "owned_by_company": owned_by_company,
-        "owner_company_name": " | ".join(f"✓ {name}" for name in owner_names),
-        "pulled_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "raw_json": item,
-        "profile_url": make_company_profile_url(company_number, company_name),
-        "shortlisted": False,
-        "target_sic": target_sic,
-        "target_address": target_address,
-        "target_address_detail": target_address_detail,
-        "target_indicators": build_target_indicators(target_sic, target_address, director_details, shareholder_details, director_count),
-    }
+    return {"company_number": company_number, "company_name": company_name, "sic_code": parse_matching_sic(item), "incorporation_date": item.get("date_of_creation", ""), "company_type": item.get("company_type", ""), "international_director": international_director, "international_director_detail": format_flagged_countries(director_details), "international_shareholder": international_shareholder, "international_shareholder_detail": format_flagged_countries(shareholder_details), "owned_by_company": owned_by_company, "owner_company_name": " | ".join(f"✓ {name}" for name in owner_names), "pulled_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), "raw_json": item, "profile_url": make_company_profile_url(company_number, company_name), "shortlisted": False, "target_sic": target_sic, "target_address": target_address, "target_address_detail": target_address_detail, "target_indicators": build_target_indicators(target_sic, target_address, director_details, shareholder_details, director_count)}
 
 
 def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
-    columns = [
-        "Company Name", "Google Funding Search", "Shortlist", "Incorporation Date", "Target SIC", "Rating",
-        "Target Indicators", "SIC Code", "Signals", "International Director", "International Shareholder",
-        "Owned By A Company", "Profile", "Pulled At", "company_number",
-    ]
+    columns = ["Company Name", "Google Funding Search", "Funding secured?", "NAB'd", "Owned by B/J", "Shortlist", "Incorporation Date", "Target SIC", "Rating", "Target Indicators", "SIC Code", "Signals", "International Director", "International Shareholder", "Owned By A Company", "Profile", "Pulled At", "company_number"]
     if db_df.empty:
         return pd.DataFrame(columns=columns)
     rows = []
@@ -473,23 +438,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
         if str(row.get("owner_company_name", "")).startswith("✓"):
             signals.append("🏢")
         company_name = row.get("company_name", "")
-        rows.append({
-            "Company Name": company_name,
-            "Google Funding Search": make_google_funding_search_url(company_name),
-            "Shortlist": bool(row.get("shortlisted", 0)),
-            "Incorporation Date": row.get("incorporation_date", ""),
-            "Target SIC": "🎯" if bool(row.get("target_sic", 0)) else "",
-            "Rating": build_rating(bool(extract_country_flags(director_values)), bool(extract_country_flags(shareholder_values)), str(row.get("owner_company_name", "")).startswith("✓"), bool(row.get("target_sic", 0)), director_values, shareholder_values),
-            "Target Indicators": row.get("target_indicators", ""),
-            "SIC Code": row.get("sic_code", ""),
-            "Signals": " ".join(signals),
-            "International Director": row.get("international_director_detail", ""),
-            "International Shareholder": row.get("international_shareholder_detail", ""),
-            "Owned By A Company": row.get("owner_company_name", ""),
-            "Profile": row.get("profile_url", ""),
-            "Pulled At": row.get("pulled_at", ""),
-            "company_number": row.get("company_number", ""),
-        })
+        rows.append({"Company Name": company_name, "Google Funding Search": make_google_funding_search_url(company_name), "Funding secured?": bool(row.get("funding_secured", 0)), "NAB'd": bool(row.get("nabd", 0)), "Owned by B/J": bool(row.get("owned_by_bj", 0)), "Shortlist": bool(row.get("shortlisted", 0)), "Incorporation Date": row.get("incorporation_date", ""), "Target SIC": "🎯" if bool(row.get("target_sic", 0)) else "", "Rating": build_rating(bool(extract_country_flags(director_values)), bool(extract_country_flags(shareholder_values)), str(row.get("owner_company_name", "")).startswith("✓"), bool(row.get("target_sic", 0)), director_values, shareholder_values), "Target Indicators": row.get("target_indicators", ""), "SIC Code": row.get("sic_code", ""), "Signals": " ".join(signals), "International Director": row.get("international_director_detail", ""), "International Shareholder": row.get("international_shareholder_detail", ""), "Owned By A Company": row.get("owner_company_name", ""), "Profile": row.get("profile_url", ""), "Pulled At": row.get("pulled_at", ""), "company_number": row.get("company_number", "")})
     return pd.DataFrame(rows, columns=columns)
 
 
@@ -548,28 +497,22 @@ def main() -> None:
     st.title("Companies House New Incorporations Screener")
     st.caption("Pull newly incorporated active companies, screen target SIC codes, and enrich results with officer and PSC checks.")
     st.markdown('<div class="app-note">Designed for rapid lead triage: select a date range, run the pull, filter signals, shortlist candidates, and open Companies House profiles.</div>', unsafe_allow_html=True)
-
     with st.expander("Secrets format", expanded=False):
         st.code('COMPANIES_HOUSE_API_KEYS = [\n  "key-1",\n  "key-2"\n]', language="toml")
-
     try:
         api_keys = validate_api_keys()
     except Exception as exc:
         st.error(str(exc))
         st.stop()
-
     conn = init_db()
     client = CHClient(api_keys)
     start_date, end_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only, hide_mfg_wholesale = render_sidebar(date.today(), date.today())
-
     if start_date > end_date:
         st.sidebar.error("The 'from' date must be on or before the 'to' date.")
         st.stop()
-
     start_date_str = start_date.isoformat()
     end_date_str = end_date.isoformat()
     range_label = start_date_str if start_date_str == end_date_str else f"{start_date_str} to {end_date_str}"
-
     if run:
         failures: List[str] = []
         with st.status("Running Companies House screening...", expanded=True) as status:
@@ -596,59 +539,35 @@ def main() -> None:
                 status.update(label="Completed with some errors", state="error")
             else:
                 status.update(label="Refresh complete", state="complete")
-
     display_df = build_display_df(read_db_rows(conn, start_date_str, end_date_str))
     render_kpis(display_df)
     filtered_df = apply_filters(display_df, only_flagged, selected_signals, sic_search, company_name_search, shortlisted_only, hide_mfg_wholesale)
-
     tab_results, tab_shortlist, tab_settings = st.tabs(["Results", "Shortlist", "Settings"])
     with tab_results:
         st.subheader("Results")
         st.caption(f"Loaded {len(api_keys)} API key(s) for {range_label}. {len(filtered_df):,} rows currently visible after filters.")
-        editable_columns = [
-            "Company Name", "Google Funding Search", "Shortlist", "Incorporation Date", "Target SIC", "Rating",
-            "Target Indicators", "SIC Code", "Signals", "International Director", "International Shareholder",
-            "Owned By A Company", "Profile", "Pulled At", "company_number",
-        ]
+        editable_columns = ["Company Name", "Google Funding Search", "Funding secured?", "NAB'd", "Owned by B/J", "Shortlist", "Incorporation Date", "Target SIC", "Rating", "Target Indicators", "SIC Code", "Signals", "International Director", "International Shareholder", "Owned By A Company", "Profile", "Pulled At", "company_number"]
         editor_df = filtered_df[editable_columns].copy()
-        edited_df = st.data_editor(
-            editor_df,
-            use_container_width=True,
-            hide_index=True,
-            disabled=[column for column in editable_columns if column not in {"Shortlist"}],
-            column_config={
-                "Shortlist": st.column_config.CheckboxColumn("Shortlist"),
-                "Google Funding Search": st.column_config.LinkColumn("Google Funding Search", display_text="Search funding"),
-                "Profile": st.column_config.LinkColumn("Profile", display_text="Open record"),
-                "company_number": None,
-            },
-            key=f"results_editor_{start_date_str}_{end_date_str}",
-        )
+        edited_df = st.data_editor(editor_df, use_container_width=True, hide_index=True, disabled=[column for column in editable_columns if column not in set(CHECKBOX_COLUMNS)], column_config={"Funding secured?": st.column_config.CheckboxColumn("Funding secured?"), "NAB'd": st.column_config.CheckboxColumn("NAB'd"), "Owned by B/J": st.column_config.CheckboxColumn("Owned by B/J"), "Shortlist": st.column_config.CheckboxColumn("Shortlist"), "Google Funding Search": st.column_config.LinkColumn("Google Funding Search", display_text="Search funding"), "Profile": st.column_config.LinkColumn("Profile", display_text="Open record"), "company_number": None}, key=f"results_editor_{start_date_str}_{end_date_str}")
         if not edited_df.empty:
-            changes = edited_df[["company_number", "Shortlist"]].merge(display_df[["company_number", "Shortlist"]], on="company_number", suffixes=("_new", "_old"), how="left")
-            changed_rows = changes[changes["Shortlist_new"] != changes["Shortlist_old"]]
-            for _, row in changed_rows.iterrows():
-                set_shortlisted_state(conn, row["company_number"], bool(row["Shortlist_new"]))
-            if not changed_rows.empty:
+            changes = edited_df[["company_number"] + CHECKBOX_COLUMNS].merge(display_df[["company_number"] + CHECKBOX_COLUMNS], on="company_number", suffixes=("_new", "_old"), how="left")
+            changed_rows = []
+            for _, changed_row in changes.iterrows():
+                for display_column in CHECKBOX_COLUMNS:
+                    if bool(changed_row[f"{display_column}_new"]) != bool(changed_row[f"{display_column}_old"]):
+                        changed_rows.append((changed_row["company_number"], DB_CHECKBOX_COLUMNS[display_column], bool(changed_row[f"{display_column}_new"])))
+            for company_number, db_column, checked in changed_rows:
+                set_company_checkbox_state(conn, company_number, db_column, checked)
+            if changed_rows:
                 st.rerun()
         st.download_button("Download filtered CSV", filtered_df.drop(columns=["company_number"], errors="ignore").to_csv(index=False).encode("utf-8"), f"companies_house_screening_{start_date_str}_{end_date_str}.csv", "text/csv", use_container_width=True)
-
     with tab_shortlist:
         shortlist_df = display_df[display_df["Shortlist"]].copy()
         if shortlist_df.empty:
             st.info("No shortlisted companies yet. Tick the shortlist checkbox in the Results tab to build a follow-up queue.")
         else:
-            st.dataframe(
-                shortlist_df.drop(columns=["company_number"], errors="ignore"),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Google Funding Search": st.column_config.LinkColumn("Google Funding Search", display_text="Search funding"),
-                    "Profile": st.column_config.LinkColumn("Profile", display_text="Open record"),
-                },
-            )
+            st.dataframe(shortlist_df.drop(columns=["company_number"], errors="ignore"), use_container_width=True, hide_index=True, column_config={"Funding secured?": st.column_config.CheckboxColumn("Funding secured?", disabled=True), "NAB'd": st.column_config.CheckboxColumn("NAB'd", disabled=True), "Owned by B/J": st.column_config.CheckboxColumn("Owned by B/J", disabled=True), "Google Funding Search": st.column_config.LinkColumn("Google Funding Search", display_text="Search funding"), "Profile": st.column_config.LinkColumn("Profile", display_text="Open record")})
             st.download_button("Download shortlist CSV", shortlist_df.drop(columns=["company_number"], errors="ignore").to_csv(index=False).encode("utf-8"), f"companies_house_shortlist_{start_date_str}_{end_date_str}.csv", "text/csv", use_container_width=True)
-
     with tab_settings:
         st.subheader("Current search settings")
         st.markdown(f"""
