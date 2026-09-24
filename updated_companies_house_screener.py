@@ -582,14 +582,29 @@ def main() -> None:
             st.write(f"Deduped company numbers: {diagnostics['deduped_results']}")
             st.write(f"Already screened for {range_label}: {len(already_seen)}")
             st.write(f"New companies to enrich: {len(new_companies)}")
-            progress = st.progress(0)
+
+            total_to_screen = len(new_companies)
+            progress = st.progress(
+                0,
+                text=f"Screened 0 of {total_to_screen} — {total_to_screen} remaining",
+            )
+
             for index, item in enumerate(new_companies, start=1):
                 company_number = item.get("company_number", "unknown")
                 try:
                     upsert_company(conn, process_company(client, item))
                 except Exception as exc:
                     failures.append(f"{company_number}: {exc}")
-                progress.progress(index / max(len(new_companies), 1))
+
+                remaining = total_to_screen - index
+                progress.progress(
+                    index / max(total_to_screen, 1),
+                    text=f"Screened {index} of {total_to_screen} — {remaining} remaining",
+                )
+
+            if total_to_screen == 0:
+                progress.progress(1.0, text="Screened 0 of 0 — 0 remaining")
+
             if failures:
                 st.warning(f"Failed enrichments: {len(failures)}")
                 st.code("\n".join(failures[:50]))
