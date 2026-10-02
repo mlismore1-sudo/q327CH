@@ -14,7 +14,11 @@ import streamlit as st
 st.set_page_config(page_title="Companies House New Incorporations Screener", layout="wide")
 
 BASE_URL = "https://api.company-information.service.gov.uk"
-DB_PATH = "companies_house_screening.db"
+
+# Use in-memory DB by default to avoid ephemeral filesystem issues during debugging.
+# Once persistence is confirmed, you can switch this back to "companies_house_screening.db".
+DB_PATH = ":memory:"
+
 SEARCH_PAGE_SIZE = 5000
 OFFICERS_PAGE_SIZE = 100
 PSC_PAGE_SIZE = 100
@@ -613,6 +617,10 @@ def process_company(client: CHClient, item: Dict[str, Any]) -> Dict[str, Any]:
     company_number = item.get("company_number", "")
     company_name = item.get("company_name") or item.get("title") or ""
 
+    # Normalize incorporation date to YYYY-MM-DD
+    inc_date_raw = item.get("date_of_creation", "")
+    inc_date = inc_date_raw[:10] if inc_date_raw else ""
+
     # Directors
     international_director, director_details, director_count, eligible_foreign_director_countries = collect_international_director_details(client, company_number)
 
@@ -643,7 +651,7 @@ def process_company(client: CHClient, item: Dict[str, Any]) -> Dict[str, Any]:
         "company_number": company_number,
         "company_name": company_name,
         "sic_code": parse_matching_sic(item),
-        "incorporation_date": item.get("date_of_creation", ""),
+        "incorporation_date": inc_date,
         "company_type": item.get("company_type", ""),
         "international_director": international_director,
         "international_director_detail": director_detail_str,
@@ -775,8 +783,9 @@ def main() -> None:
     with st.expander("Secrets format", expanded=False):
         st.code('COMPANIES_HOUSE_API_KEYS = [\n  "key-1",\n  "key-2"\n]', language="toml")
 
-    # DEBUG: show DB path
-    st.caption(f"DB path: {os.path.abspath(DB_PATH)}")
+    # DEBUG: environment & DB path
+    st.caption(f"DB path: {os.path.abspath(DB_PATH) if DB_PATH != ':memory:' else ':memory:'}")
+    st.caption(f"DB_PATH value: {DB_PATH!r}")
 
     try:
         api_keys = validate_api_keys()
@@ -796,7 +805,7 @@ def main() -> None:
     end_date_str = end_date.isoformat()
     range_label = start_date_str if start_date_str == end_date_str else f"{start_date_str} to {end_date_str}"
 
-    # DEBUG: show current DB contents before any run
+    # DEBUG: DB state before screening
     with st.expander("DEBUG CONTROLS: DB state before screening", expanded=False):
         pre_df = read_db_rows(conn, start_date_str, end_date_str)
         st.write(f"Rows in DB for {range_label} before screening: {len(pre_df)}")
@@ -870,6 +879,8 @@ def main() -> None:
                 with st.expander("DEBUG: sample of processed companies", expanded=False):
                     st.write(f"Processed {len(new_companies)} new companies. Showing up to 5 samples:")
                     st.write(sample_debug)
+            else:
+                st.info("No new companies were processed (either 0 new companies or an early failure).")
 
             # DEBUG: DB state after screening
             post_df = read_db_rows(conn, start_date_str, end_date_str)
@@ -885,6 +896,18 @@ def main() -> None:
                     st.dataframe(post_df[available].head(20))
                 else:
                     st.warning("Still 0 rows in DB after screening. This suggests upsert is not persisting or DB path is wrong.")
+
+            # DEBUG: DB file check (only if not in-memory)
+            if DB_PATH != ":memory:":
+                db_exists = os.path.exists(DB_PATH)
+                db_size = os.path.getsize(DB_PATH) if db_exists else None
+                with st.expander("DEBUG: DB file check", expanded=False):
+                    st.write(f"DB path: {os.path.abspath(DB_PATH)}")
+                    st.write(f"DB exists on disk: {db_exists}")
+                    if db_exists:
+                        st.write(f"DB size (bytes): {db_size}")
+                    else:
+                        st.error("DB file does not exist on disk. Your hosting environment is likely ephemeral; SQLite will not persist between requests.")
 
     raw_df = read_db_rows(conn, start_date_str, end_date_str)
     display_df = build_display_df(raw_df)
