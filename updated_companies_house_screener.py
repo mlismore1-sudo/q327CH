@@ -12,6 +12,8 @@ import streamlit as st
 
 st.set_page_config(page_title="Companies House New Incorporations Screener", layout="wide")
 
+DB_PATH = "companies_house_screener.db"
+
 BASE_URL = "https://api.company-information.service.gov.uk"
 
 ALLOWED_SIC_CODES = [
@@ -72,6 +74,11 @@ NATIONALITY_TO_COUNTRY = {
     "singaporean": "singapore", "dutch": "netherlands", "netherlands": "netherlands",
 }
 SIGNAL_OPTIONS = ["International Director", "International Shareholder", "Owned By A Company"]
+
+# Page size constants (add these if not already defined elsewhere)
+SEARCH_PAGE_SIZE = 100
+OFFICERS_PAGE_SIZE = 100
+PSC_PAGE_SIZE = 100
 
 def apply_custom_css() -> None:
     st.markdown(
