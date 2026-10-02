@@ -14,6 +14,11 @@ st.set_page_config(page_title="Companies House New Incorporations Screener", lay
 
 DB_PATH = "companies_house_screener.db"
 
+# Page size constants (required for pagination to work)
+SEARCH_PAGE_SIZE = 100
+OFFICERS_PAGE_SIZE = 100
+PSC_PAGE_SIZE = 100
+
 BASE_URL = "https://api.company-information.service.gov.uk"
 
 ALLOWED_SIC_CODES = [
@@ -74,10 +79,6 @@ NATIONALITY_TO_COUNTRY = {
     "singaporean": "singapore", "dutch": "netherlands", "netherlands": "netherlands",
 }
 SIGNAL_OPTIONS = ["International Director", "International Shareholder", "Owned By A Company"]
-
-SEARCH_PAGE_SIZE = 100
-OFFICERS_PAGE_SIZE = 100
-PSC_PAGE_SIZE = 100
 
 
 def apply_custom_css() -> None:
@@ -301,43 +302,31 @@ def validate_api_keys() -> List[str]:
 
 def paged_get_items(client: CHClient, path: str, page_size: int, extra_params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
-    Paginate through a Companies House list endpoint until all results are consumed.
-    page_size should be <= 100.
+    Your original pagination logic, with syntax fixed.
+    This correctly iterates through all pages until start_index >= total.
     """
     items: List[Dict[str, Any]] = []
     start_index = 0
-
     while True:
         params: Dict[str, Any] = {"start_index": start_index}
         if extra_params:
             params.update(extra_params)
-
-        if path == "/advanced-search/companies":
-            params["size"] = page_size
-        else:
-            params["items_per_page"] = page_size
-
+        params["size" if path == "/advanced-search/companies" else "items_per_page"] = page_size
         payload = client.get(path, params=params)
         batch = payload.get("items", []) or []
         items.extend(batch)
-
-        total = int(payload.get("total_results") or payload.get("total_count") or 0)
-        if total == 0:
-            # No results or API didn't return a total; stop after first page
-            break
-
+        total = int(payload.get("total_results") or payload.get("total_count") or len(items))
         start_index += page_size
-        if start_index >= total or not batch:
+        if not batch or start_index >= total:
             break
-
     return items
 
 
+def is_allowed_company_type(value: Any) -> bool:
+    return normalize_text(value) in NORMALIZED_ALLOWED_COMPANY_TYPES
+
+
 def search_new_companies(client: CHClient, start_date: str, end_date: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """
-    Search newly incorporated companies between start_date and end_date (inclusive),
-    paginating through all available results.
-    """
     params = {
         "incorporated_from": start_date,
         "incorporated_to": end_date,
@@ -345,16 +334,13 @@ def search_new_companies(client: CHClient, start_date: str, end_date: str) -> Tu
         "company_type": ",".join(ALLOWED_COMPANY_TYPES),
         "sic_codes": ",".join(ALL_ALLOWED_SIC_CODES),
     }
-
     items = paged_get_items(client, "/advanced-search/companies", SEARCH_PAGE_SIZE, params)
-
     filtered = [
         item for item in items
         if any(str(code) in ALL_ALLOWED_SIC_CODES for code in (item.get("sic_codes") or []))
         and item.get("company_status", "").lower() == "active"
         and is_allowed_company_type(item.get("company_type", ""))
     ]
-
     deduped = {item["company_number"]: item for item in filtered if item.get("company_number")}
     return list(deduped.values()), {
         "raw_results": len(items),
@@ -363,10 +349,6 @@ def search_new_companies(client: CHClient, start_date: str, end_date: str) -> Tu
         "company_types_sent": ", ".join(ALLOWED_COMPANY_TYPES),
         "sic_count": len(ALL_ALLOWED_SIC_CODES),
     }
-
-
-def is_allowed_company_type(value: Any) -> bool:
-    return normalize_text(value) in NORMALIZED_ALLOWED_COMPANY_TYPES
 
 
 def get_all_officers(client: CHClient, company_number: str) -> List[Dict[str, Any]]:
