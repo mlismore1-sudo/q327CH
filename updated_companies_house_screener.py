@@ -281,6 +281,10 @@ def set_shortlisted_state(conn: sqlite3.Connection, company_number: str, shortli
 
 
 def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
+    rating = row.get("rating", "")
+    if not rating:
+        # Fallback: ensure every row has at least a minimal rating
+        rating = "⭐"
     conn.execute(
         """
         INSERT OR REPLACE INTO screened_companies (
@@ -301,7 +305,7 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
             json.dumps(row.get("raw_json", {})), row.get("profile_url", ""), int(row.get("shortlisted", False)),
             int(row.get("target_sic", False)), int(row.get("target_address", False)),
             row.get("target_address_detail", ""), row.get("target_indicators", ""),
-            row.get("rating", ""), row.get("director_count", 0), int(row.get("has_company_psc", False)),
+            rating, row.get("director_count", 0), int(row.get("has_company_psc", False)),
             int(row.get("has_any_psc", False)), json.dumps(row.get("eligible_foreign_director_countries", [])),
         ),
     )
@@ -559,6 +563,9 @@ def build_rating_new(
     - If director_count >= 3 and at least one eligible foreign director: min 6★
     - If director_count >= 2 and at least one eligible foreign director and has_company_psc: min 7★
     - If has_company_psc: min 3★
+
+    Fallback:
+    - If no stars earned, return at least 1★ so the column is never blank.
     """
     stars = 0
 
@@ -576,6 +583,10 @@ def build_rating_new(
     # 4. Extra directors above 1
     if director_count > 1:
         stars += director_count - 1
+
+    # Ensure at least 1 star for any real company
+    if stars == 0:
+        stars = 1
 
     # Apply minimum floors
     has_eligible_foreign = num_eligible_foreign_directors > 0
@@ -612,14 +623,17 @@ def process_company(client: CHClient, item: Dict[str, Any]) -> Dict[str, Any]:
     shareholder_detail_str = format_flagged_countries(shareholder_details)
     owner_company_str = " | ".join(f"✓ {name}" for name in owner_names) if owner_names else ""
 
-    # New rating
-    rating = build_rating_new(
-        company_name=company_name,
-        director_count=director_count,
-        eligible_foreign_director_countries=eligible_foreign_director_countries,
-        has_company_psc=has_company_psc,
-        has_any_psc=has_any_psc,
-    )
+    # New rating – with explicit fallback
+    try:
+        rating = build_rating_new(
+            company_name=company_name,
+            director_count=director_count,
+            eligible_foreign_director_countries=eligible_foreign_director_countries,
+            has_company_psc=has_company_psc,
+            has_any_psc=has_any_psc,
+        )
+    except Exception:
+        rating = "⭐"
 
     return {
         "company_number": company_number,
@@ -672,8 +686,10 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
 
         company_name = row.get("company_name", "")
 
-        # Use the rating stored in the DB (computed by build_rating_new)
         rating = row.get("rating", "")
+        if not rating or not isinstance(rating, str) or not rating.strip():
+            # Fallback for old rows or NULLs
+            rating = "⭐"
 
         rows.append({
             "Company Name": company_name,
