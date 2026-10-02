@@ -73,8 +73,7 @@ NATIONALITY_TO_COUNTRY = {
 }
 SIGNAL_OPTIONS = ["International Director", "International Shareholder", "Owned By A Company"]
 
-# Configuration constants
-SEARCH_PAGE_SIZE = 50
+SEARCH_PAGE_SIZE = 5000
 OFFICERS_PAGE_SIZE = 50
 PSC_PAGE_SIZE = 50
 DB_PATH = "screened_companies.db"
