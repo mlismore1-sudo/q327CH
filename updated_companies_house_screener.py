@@ -75,10 +75,10 @@ NATIONALITY_TO_COUNTRY = {
 }
 SIGNAL_OPTIONS = ["International Director", "International Shareholder", "Owned By A Company"]
 
-# Page size constants (add these if not already defined elsewhere)
 SEARCH_PAGE_SIZE = 100
 OFFICERS_PAGE_SIZE = 100
 PSC_PAGE_SIZE = 100
+
 
 def apply_custom_css() -> None:
     st.markdown(
@@ -97,6 +97,7 @@ border: 1px solid rgba(120, 120, 120, 0.18); padding: 14px 16px; border-radius: 
         unsafe_allow_html=True,
     )
 
+
 def normalize_text(value: Any) -> str:
     if value is None:
         return ""
@@ -110,8 +111,10 @@ def normalize_text(value: Any) -> str:
     }
     return aliases.get(text, text)
 
+
 NORMALIZED_COUNTRY_TERMS = {normalize_text(x) for x in COUNTRY_TERMS}
 NORMALIZED_ALLOWED_COMPANY_TYPES = {normalize_text(x) for x in ALLOWED_COMPANY_TYPES}
+
 
 def canonical_country_from_value(value: Any) -> str:
     norm = normalize_text(value)
@@ -120,6 +123,7 @@ def canonical_country_from_value(value: Any) -> str:
     if norm in NORMALIZED_COUNTRY_TERMS:
         return "united states" if norm == "usa" else norm
     return NATIONALITY_TO_COUNTRY.get(norm, "")
+
 
 def dedupe_preserve_order(values: List[str]) -> List[str]:
     out: List[str] = []
@@ -131,6 +135,7 @@ def dedupe_preserve_order(values: List[str]) -> List[str]:
             out.append(value)
     return out
 
+
 def country_label(value: str) -> str:
     if value == "united states":
         return "USA"
@@ -138,16 +143,20 @@ def country_label(value: str) -> str:
         return "Hong Kong"
     return value.title()
 
+
 def format_flagged_countries(values: List[str]) -> str:
     countries = dedupe_preserve_order([canonical_country_from_value(v) for v in values if canonical_country_from_value(v)])
     return " | ".join(f"✓ {COUNTRY_FLAG_MAP.get(v, '🌍')} {country_label(v)}" for v in countries)
+
 
 def extract_country_flags(values: List[str]) -> List[str]:
     countries = dedupe_preserve_order([canonical_country_from_value(v) for v in values if canonical_country_from_value(v)])
     return [COUNTRY_FLAG_MAP[v] for v in countries if v in COUNTRY_FLAG_MAP]
 
+
 def make_company_profile_url(company_number: str, company_name: str) -> str:
     return f"https://find-and-update.company-information.service.gov.uk/company/{company_number}#{quote(company_name)}"
+
 
 def make_google_funding_search_url(company_name: str) -> str:
     clean_name = re.sub(
@@ -157,6 +166,7 @@ def make_google_funding_search_url(company_name: str) -> str:
         flags=re.IGNORECASE,
     ).strip()
     return f"https://www.google.com/search?q={quote(f'{clean_name} funding')}"
+
 
 class CHClient:
     def __init__(self, api_keys: List[str]):
@@ -195,11 +205,13 @@ class CHClient:
                 time.sleep(0.5)
         raise RuntimeError(f"Companies House API request failed after retries: {last_error}")
 
+
 def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in existing:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         conn.commit()
+
 
 def init_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -231,6 +243,7 @@ def init_db() -> sqlite3.Connection:
     ensure_column(conn, "screened_companies", "target_indicators", "TEXT")
     return conn
 
+
 def existing_company_numbers(conn: sqlite3.Connection, start_date: str, end_date: str) -> set:
     rows = conn.execute(
         "SELECT company_number FROM screened_companies WHERE incorporation_date BETWEEN ? AND ?",
@@ -238,9 +251,11 @@ def existing_company_numbers(conn: sqlite3.Connection, start_date: str, end_date
     ).fetchall()
     return {row[0] for row in rows}
 
+
 def set_shortlisted_state(conn: sqlite3.Connection, company_number: str, shortlisted: bool) -> None:
     conn.execute("UPDATE screened_companies SET shortlisted = ? WHERE company_number = ?", (int(shortlisted), company_number))
     conn.commit()
+
 
 def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
     conn.execute(
@@ -266,12 +281,14 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
     )
     conn.commit()
 
+
 def read_db_rows(conn: sqlite3.Connection, start_date: str, end_date: str) -> pd.DataFrame:
     return pd.read_sql_query(
         "SELECT * FROM screened_companies WHERE incorporation_date BETWEEN ? AND ? ORDER BY pulled_at DESC",
         conn,
         params=(start_date, end_date),
     )
+
 
 def validate_api_keys() -> List[str]:
     if "COMPANIES_HOUSE_API_KEYS" not in st.secrets:
@@ -281,27 +298,46 @@ def validate_api_keys() -> List[str]:
         raise ValueError("COMPANIES_HOUSE_API_KEYS is empty")
     return keys
 
+
 def paged_get_items(client: CHClient, path: str, page_size: int, extra_params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """
+    Paginate through a Companies House list endpoint until all results are consumed.
+    page_size should be <= 100.
+    """
     items: List[Dict[str, Any]] = []
     start_index = 0
+
     while True:
         params: Dict[str, Any] = {"start_index": start_index}
         if extra_params:
             params.update(extra_params)
-        params["size" if path == "/advanced-search/companies" else "items_per_page"] = page_size
+
+        if path == "/advanced-search/companies":
+            params["size"] = page_size
+        else:
+            params["items_per_page"] = page_size
+
         payload = client.get(path, params=params)
         batch = payload.get("items", []) or []
         items.extend(batch)
-        total = int(payload.get("total_results") or payload.get("total_count") or len(items))
-        start_index += page_size
-        if not batch or start_index >= total:
+
+        total = int(payload.get("total_results") or payload.get("total_count") or 0)
+        if total == 0:
+            # No results or API didn't return a total; stop after first page
             break
+
+        start_index += page_size
+        if start_index >= total or not batch:
+            break
+
     return items
 
-def is_allowed_company_type(value: Any) -> bool:
-    return normalize_text(value) in NORMALIZED_ALLOWED_COMPANY_TYPES
 
 def search_new_companies(client: CHClient, start_date: str, end_date: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Search newly incorporated companies between start_date and end_date (inclusive),
+    paginating through all available results.
+    """
     params = {
         "incorporated_from": start_date,
         "incorporated_to": end_date,
@@ -309,24 +345,37 @@ def search_new_companies(client: CHClient, start_date: str, end_date: str) -> Tu
         "company_type": ",".join(ALLOWED_COMPANY_TYPES),
         "sic_codes": ",".join(ALL_ALLOWED_SIC_CODES),
     }
+
     items = paged_get_items(client, "/advanced-search/companies", SEARCH_PAGE_SIZE, params)
+
     filtered = [
         item for item in items
         if any(str(code) in ALL_ALLOWED_SIC_CODES for code in (item.get("sic_codes") or []))
         and item.get("company_status", "").lower() == "active"
         and is_allowed_company_type(item.get("company_type", ""))
     ]
+
     deduped = {item["company_number"]: item for item in filtered if item.get("company_number")}
     return list(deduped.values()), {
-        "raw_results": len(items), "filtered_results": len(filtered), "deduped_results": len(deduped),
-        "company_types_sent": ", ".join(ALLOWED_COMPANY_TYPES), "sic_count": len(ALL_ALLOWED_SIC_CODES),
+        "raw_results": len(items),
+        "filtered_results": len(filtered),
+        "deduped_results": len(deduped),
+        "company_types_sent": ", ".join(ALLOWED_COMPANY_TYPES),
+        "sic_count": len(ALL_ALLOWED_SIC_CODES),
     }
+
+
+def is_allowed_company_type(value: Any) -> bool:
+    return normalize_text(value) in NORMALIZED_ALLOWED_COMPANY_TYPES
+
 
 def get_all_officers(client: CHClient, company_number: str) -> List[Dict[str, Any]]:
     return paged_get_items(client, f"/company/{company_number}/officers", OFFICERS_PAGE_SIZE)
 
+
 def get_all_pscs(client: CHClient, company_number: str) -> List[Dict[str, Any]]:
     return paged_get_items(client, f"/company/{company_number}/persons-with-significant-control", PSC_PAGE_SIZE)
+
 
 def collect_international_director_details(client: CHClient, company_number: str) -> Tuple[bool, List[str], int]:
     matches: List[str] = []
@@ -341,6 +390,7 @@ def collect_international_director_details(client: CHClient, company_number: str
                 matches.append(str(value))
     matches = dedupe_preserve_order(matches)
     return bool(matches), matches, director_count
+
 
 def analyse_psc_flags(client: CHClient, company_number: str) -> Tuple[bool, List[str], bool, List[str]]:
     shareholder_matches: List[str] = []
@@ -358,15 +408,19 @@ def analyse_psc_flags(client: CHClient, company_number: str) -> Tuple[bool, List
     owner_names = dedupe_preserve_order(owner_names)
     return bool(shareholder_matches), shareholder_matches, bool(owner_names), owner_names
 
+
 def parse_matching_sic(item: Dict[str, Any]) -> str:
     codes = [str(code) for code in (item.get("sic_codes") or [])]
     return ", ".join([code for code in codes if code in ALL_ALLOWED_SIC_CODES] or codes[:1])
 
+
 def is_target_sic(item: Dict[str, Any]) -> bool:
     return any(str(code) in TARGET_SIC_CODES for code in (item.get("sic_codes") or []))
 
+
 def has_bonus_star(values: List[str]) -> bool:
     return bool({canonical_country_from_value(value) for value in values} & BONUS_STAR_COUNTRIES)
+
 
 def is_target_address(item: Dict[str, Any]) -> Tuple[bool, str]:
     address = item.get("registered_office_address") or item.get("address") or {}
@@ -374,6 +428,7 @@ def is_target_address(item: Dict[str, Any]) -> Tuple[bool, str]:
     if country:
         return True, f"✓ {COUNTRY_FLAG_MAP.get(country, '🏠')} {country_label(country)}"
     return False, ""
+
 
 def build_target_indicators(target_sic: bool, target_address: bool, director_details: List[str], shareholder_details: List[str], director_count: int) -> str:
     indicators: List[str] = []
@@ -388,11 +443,13 @@ def build_target_indicators(target_sic: bool, target_address: bool, director_det
         indicators.append({2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"}.get(min(director_count, 10), "#️⃣"))
     return " ".join(indicators)
 
+
 def build_rating(international_director: bool, international_shareholder: bool, owned_by_company: bool, target_sic: bool, director_details: List[str], shareholder_details: List[str]) -> str:
     stars = sum([international_director, international_shareholder, owned_by_company, target_sic])
     if has_bonus_star(director_details) or has_bonus_star(shareholder_details):
         stars += 1
     return "⭐" * stars
+
 
 def process_company(client: CHClient, item: Dict[str, Any]) -> Dict[str, Any]:
     company_number = item.get("company_number", "")
@@ -422,6 +479,7 @@ def process_company(client: CHClient, item: Dict[str, Any]) -> Dict[str, Any]:
         "target_address_detail": target_address_detail,
         "target_indicators": build_target_indicators(target_sic, target_address, director_details, shareholder_details, director_count),
     }
+
 
 def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
     columns = [
@@ -461,6 +519,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
         })
     return pd.DataFrame(rows, columns=columns)
 
+
 def apply_filters(df: pd.DataFrame, only_flagged: bool, selected_signals: List[str], sic_search: str, company_name_search: str, shortlisted_only: bool, hide_mfg_wholesale: bool) -> pd.DataFrame:
     filtered = df.copy()
     if shortlisted_only:
@@ -482,6 +541,7 @@ def apply_filters(df: pd.DataFrame, only_flagged: bool, selected_signals: List[s
         filtered = filtered[~filtered["SIC Code"].astype(str).apply(lambda s: any(code.strip() in MANUFACTURING_WHOLESALE_SIC_CODES for code in s.split(",")))].copy()
     return filtered
 
+
 def render_kpis(display_df: pd.DataFrame) -> None:
     total = len(display_df)
     director = int(display_df["International Director"].astype(str).str.startswith("✓", na=False).sum()) if total else 0
@@ -491,6 +551,7 @@ def render_kpis(display_df: pd.DataFrame) -> None:
     target_sics = int(display_df["Target SIC"].eq("🎯").sum()) if total else 0
     for column, label, value in zip(st.columns(6), ["Total Results", "Flagged Rows", "Intl Directors", "Intl Shareholders", "Target SICs", "Shortlisted"], [total, flagged, director, shareholder, target_sics, shortlisted]):
         column.metric(label, f"{value:,}")
+
 
 def render_sidebar(default_start: date, default_end: date) -> Tuple[date, date, bool, List[str], str, str, bool, bool, bool]:
     with st.sidebar:
@@ -507,6 +568,7 @@ def render_sidebar(default_start: date, default_end: date) -> Tuple[date, date, 
         company_name_search = st.text_input("Filter by company name", placeholder="e.g. Labs")
         shortlisted_only = st.checkbox("Show shortlisted only", value=False)
         return start_date, end_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only, hide_mfg_wholesale
+
 
 def main() -> None:
     apply_custom_css()
@@ -640,6 +702,7 @@ SIC codes sent to API: {len(ALL_ALLOWED_SIC_CODES)}
 Target SIC codes: {', '.join(sorted(TARGET_SIC_CODES))}
 Dedupe rule: company numbers already screened within the selected date range are skipped
 """)
+
 
 if __name__ == "__main__":
     main()
