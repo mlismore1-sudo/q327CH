@@ -559,13 +559,10 @@ def build_rating_new(
     - +1 per director above 1 (i.e. max(0, director_count - 1))
 
     Minimum floors:
-    - If director_count >= 2 and at least one eligible foreign director: min 5★
-    - If director_count >= 3 and at least one eligible foreign director: min 6★
-    - If director_count >= 2 and at least one eligible foreign director and has_company_psc: min 7★
+    - If director_count > 2 (i.e. 3+) and at least one eligible foreign director: min 5★
+    - If director_count > 3 (i.e. 4+) and at least one eligible foreign director: min 6★
+    - If director_count > 2 (i.e. 3+) and at least one eligible foreign director and has_company_psc: min 7★
     - If has_company_psc: min 3★
-
-    Fallback:
-    - If no stars earned, return at least 1★ so the column is never blank.
     """
     stars = 0
 
@@ -584,23 +581,29 @@ def build_rating_new(
     if director_count > 1:
         stars += director_count - 1
 
-    # Ensure at least 1 star for any real company
-    if stars == 0:
-        stars = 1
-
     # Apply minimum floors
+
     has_eligible_foreign = num_eligible_foreign_directors > 0
 
-    if director_count >= 3 and has_eligible_foreign:
-        stars = max(stars, 6)
-    elif director_count >= 2 and has_eligible_foreign:
+    # 3+ directors + at least one eligible foreign → min 5★
+    if director_count > 2 and has_eligible_foreign:
         stars = max(stars, 5)
 
-    if director_count >= 2 and has_eligible_foreign and has_company_psc:
+    # 4+ directors + at least one eligible foreign → min 6★
+    if director_count > 3 and has_eligible_foreign:
+        stars = max(stars, 6)
+
+    # 3+ directors + at least one eligible foreign + company PSC → min 7★
+    if director_count > 2 and has_eligible_foreign and has_company_psc:
         stars = max(stars, 7)
 
+    # Any company PSC → min 3★
     if has_company_psc:
         stars = max(stars, 3)
+
+    # Fallback: ensure at least 1★ for any real company
+    if stars == 0:
+        stars = 1
 
     return "⭐" * stars
 
