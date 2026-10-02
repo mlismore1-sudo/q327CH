@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sqlite3
 import time
@@ -774,6 +775,9 @@ def main() -> None:
     with st.expander("Secrets format", expanded=False):
         st.code('COMPANIES_HOUSE_API_KEYS = [\n  "key-1",\n  "key-2"\n]', language="toml")
 
+    # DEBUG: show DB path
+    st.caption(f"DB path: {os.path.abspath(DB_PATH)}")
+
     try:
         api_keys = validate_api_keys()
     except Exception as exc:
@@ -792,8 +796,25 @@ def main() -> None:
     end_date_str = end_date.isoformat()
     range_label = start_date_str if start_date_str == end_date_str else f"{start_date_str} to {end_date_str}"
 
+    # DEBUG: show current DB contents before any run
+    with st.expander("DEBUG CONTROLS: DB state before screening", expanded=False):
+        pre_df = read_db_rows(conn, start_date_str, end_date_str)
+        st.write(f"Rows in DB for {range_label} before screening: {len(pre_df)}")
+        if not pre_df.empty:
+            cols = [
+                "company_name", "company_number", "rating", "director_count",
+                "has_company_psc", "international_director", "international_shareholder",
+                "owned_by_company", "incorporation_date",
+            ]
+            available = [c for c in cols if c in pre_df.columns]
+            st.dataframe(pre_df[available].head(20))
+        else:
+            st.info("No rows in DB for this date range yet.")
+
     if run:
         failures: List[str] = []
+        sample_debug: List[Dict[str, Any]] = []
+
         with st.status("Running Companies House screening...", expanded=True) as status:
             st.write(f"Searching incorporation dates from {start_date_str} to {end_date_str}.")
             companies, diagnostics = search_new_companies(client, start_date_str, end_date_str)
@@ -814,7 +835,17 @@ def main() -> None:
             for index, item in enumerate(new_companies, start=1):
                 company_number = item.get("company_number", "unknown")
                 try:
-                    upsert_company(conn, process_company(client, item))
+                    row = process_company(client, item)
+                    upsert_company(conn, row)
+                    if len(sample_debug) < 5:
+                        sample_debug.append({
+                            "company_number": company_number,
+                            "company_name": row.get("company_name"),
+                            "rating": row.get("rating"),
+                            "director_count": row.get("director_count"),
+                            "has_company_psc": row.get("has_company_psc"),
+                            "incorporation_date": row.get("incorporation_date"),
+                        })
                 except Exception as exc:
                     failures.append(f"{company_number}: {exc}")
 
@@ -834,7 +865,30 @@ def main() -> None:
             else:
                 status.update(label="Refresh complete", state="complete")
 
-    display_df = build_display_df(read_db_rows(conn, start_date_str, end_date_str))
+            # DEBUG: sample of processed companies
+            if sample_debug:
+                with st.expander("DEBUG: sample of processed companies", expanded=False):
+                    st.write(f"Processed {len(new_companies)} new companies. Showing up to 5 samples:")
+                    st.write(sample_debug)
+
+            # DEBUG: DB state after screening
+            post_df = read_db_rows(conn, start_date_str, end_date_str)
+            with st.expander("DEBUG: DB state after screening", expanded=False):
+                st.write(f"Rows in DB for {range_label} after screening: {len(post_df)}")
+                if not post_df.empty:
+                    cols = [
+                        "company_name", "company_number", "rating", "director_count",
+                        "has_company_psc", "international_director", "international_shareholder",
+                        "owned_by_company", "incorporation_date",
+                    ]
+                    available = [c for c in cols if c in post_df.columns]
+                    st.dataframe(post_df[available].head(20))
+                else:
+                    st.warning("Still 0 rows in DB after screening. This suggests upsert is not persisting or DB path is wrong.")
+
+    raw_df = read_db_rows(conn, start_date_str, end_date_str)
+    display_df = build_display_df(raw_df)
+
     render_kpis(display_df)
     filtered_df = apply_filters(display_df, only_flagged, selected_signals, sic_search, company_name_search, shortlisted_only, hide_mfg_wholesale)
 
