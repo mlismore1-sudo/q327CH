@@ -1,979 +1,580 @@
 import json
-import os
 import re
 import sqlite3
 import time
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
-
 import pandas as pd
 import requests
 import streamlit as st
-
 st.set_page_config(page_title="Companies House New Incorporations Screener", layout="wide")
-
 BASE_URL = "https://api.company-information.service.gov.uk"
 
-# Use in-memory DB by default to avoid ephemeral filesystem issues during debugging.
-# Once persistence is confirmed, you can switch this back to "companies_house_screening.db".
-DB_PATH = ":memory:"
 
-SEARCH_PAGE_SIZE = 5000
-OFFICERS_PAGE_SIZE = 100
-PSC_PAGE_SIZE = 100
 
 ALLOWED_SIC_CODES = [
-    "62012", "62020", "63120", "47910", "46190", "46499", "70229", "73110", "74909", "68209",
-    "64209", "68100", "32990", "10890", "86900", "93130", "96040", "82990", "72110", "56101",
+"62012", "62020", "63120", "47910", "46190", "46499", "70229", "73110", "74909", "68209",
+"64209", "68100", "32990", "10890", "86900", "93130", "96040", "82990", "72110", "56101",
 ]
 TARGET_SIC_CODES = {"62012", "72110", "56101"}
 MANUFACTURING_WHOLESALE_SIC_CODES = {
-    "10110", "10130", "10310", "10410", "10511", "10512", "10611", "10612", "10840", "10850", "10890",
-    "10920", "13100", "13200", "13300", "13921", "13923", "13960", "14131", "15110", "16290", "19200",
-    "20110", "20120", "20130", "20140", "20150", "20160", "20170", "20200", "20301", "20302", "20411",
-    "20412", "20590", "21100", "22210", "22290", "23190", "23910", "23990", "24100", "24200", "24310",
-    "24320", "24330", "24340", "24410", "24420", "24430", "24340", "24440", "24450", "24460", "24510",
-    "25110", "25210", "25500", "25990", "26110", "26200", "26300", "26511", "26512", "26600", "27110",
-    "27200", "28110", "28290", "28300", "28998", "29100", "29310", "30110", "30300", "31090", "32990",
-    "46110", "46120", "46130", "46140", "46150", "46160", "46170", "46180", "46190", "46210", "46220",
-    "46230", "46240", "46310", "46320", "46330", "46341", "46342", "46350", "46360", "46370", "46380",
-    "46390", "46410", "46420", "46431", "46439", "46440", "46450", "46460", "46470", "46480", "46499",
-    "46510", "46520", "46530", "46610", "46620", "46630", "46640", "46650", "46660", "46690", "46711",
-    "46719", "46720", "46730", "46740", "46750", "46900",
+"10110", "10130", "10310", "10410", "10511", "10512", "10611", "10612", "10840", "10850", "10890",
+"10920", "13100", "13200", "13300", "13921", "13923", "13960", "14131", "15110", "16290", "19200",
+"20110", "20120", "20130", "20140", "20150", "20160", "20170", "20200", "20301", "20302", "20411",
+"20412", "20590", "21100", "22210", "22290", "23190", "23910", "23990", "24100", "24200", "24310",
+"24320", "24330", "24340", "24410", "24420", "24430", "24340", "24440", "24450", "24460", "24510",
+"25110", "25210", "25500", "25990", "26110", "26200", "26300", "26511", "26512", "26600", "27110",
+"27200", "28110", "28290", "28300", "28990", "29100", "29310", "30110", "30300", "31090", "32990",
+"46110", "46120", "46130", "46140", "46150", "46160", "46170", "46180", "46190", "46210", "46220",
+"46230", "46240", "46310", "46320", "46330", "46341", "46342", "46350", "46360", "46370", "46380",
+"46390", "46410", "46420", "46431", "46439", "46440", "46450", "46460", "46470", "46480", "46499",
+"46510", "46520", "46530", "46610", "46620", "46630", "46640", "46650", "46660", "46690", "46711",
+"46719", "46720", "46730", "46740", "46750", "46900",
 }
 ALL_ALLOWED_SIC_CODES = sorted(set(ALLOWED_SIC_CODES) | MANUFACTURING_WHOLESALE_SIC_CODES)
-
 BONUS_STAR_COUNTRIES = {"sweden", "norway", "united states"}
 ALLOWED_COMPANY_TYPES = [
-    "ltd", "llp", "private-limited-guarant-nsc", "private-limited-shares-section-30-exemption",
+"ltd", "llp", "private-limited-guarant-nsc", "private-limited-shares-section-30-exemption",
 ]
 COUNTRY_TERMS = {
-    "usa", "united states", "united states of america", "france", "germany", "belgium", "norway",
-    "sweden", "finland", "denmark", "austria", "poland", "spain", "portugal", "greece", "italy",
-    "hungary", "croatia", "ireland", "china", "netherlands", "india", "hong kong", "singapore",
+"usa", "united states", "united states of america", "france", "germany", "belgium", "norway",
+"sweden", "finland", "denmark", "austria", "poland", "spain", "portugal", "greece", "italy",
+"hungary", "croatia", "ireland", "china", "netherlands", "india", "hong kong", "singapore",
 }
 NATIONALITY_TERMS = {
-    "american", "us", "united states", "united states of america", "french", "german", "belgian",
-    "norwegian", "swedish", "finnish", "danish", "austrian", "polish", "spanish", "portuguese",
-    "greek", "italian", "hungarian", "croatian", "irish", "chinese", "indian", "hong kong",
-    "hongkong", "singaporean", "dutch", "netherlands",
+"american", "us", "united states", "united states of america", "french", "german", "belgian",
+"norwegian", "swedish", "finnish", "danish", "austrian", "polish", "spanish", "portuguese",
+"greek", "italian", "hungarian", "croatian", "irish", "chinese", "indian", "hong kong",
+"hongkong", "singaporean", "dutch", "netherlands",
 }
 COMPANY_OWNER_KINDS = {
-    "corporate-entity-person-with-significant-control",
-    "legal-person-person-with-significant-control",
-    "super-secure-person-with-significant-control",
+"corporate-entity-person-with-significant-control",
+"legal-person-person-with-significant-control",
+"super-secure-person-with-significant-control",
 }
 COUNTRY_FLAG_MAP = {
-    "united states": "🇺🇸", "france": "🇫🇷", "germany": "🇩🇪", "belgium": "🇧🇪",
-    "norway": "🇳🇴", "sweden": "🇸🇪", "finland": "🇫🇮", "denmark": "🇩🇰",
-    "austria": "🇦🇹", "poland": "🇵🇱", "spain": "🇪🇸", "portugal": "🇵🇹",
-    "greece": "🇬🇷", "italy": "🇮🇹", "hungary": "🇭🇺", "croatia": "🇭🇷",
-    "ireland": "🇮🇪", "china": "🇨🇳", "netherlands": "🇳🇱", "india": "🇮🇳",
-    "hong kong": "🇭🇰", "singapore": "🇸🇬",
+"united states": "🇺🇸", "france": "🇫🇷", "germany": "🇩🇪", "belgium": "🇧🇪",
+"norway": "🇳🇴", "sweden": "🇸🇪", "finland": "🇫🇮", "denmark": "🇩🇰",
+"austria": "🇦🇹", "poland": "🇵🇱", "spain": "🇪🇸", "portugal": "🇵🇹",
+"greece": "🇬🇷", "italy": "🇮🇹", "hungary": "🇭🇺", "croatia": "🇭🇷",
+"ireland": "🇮🇪", "china": "🇨🇳", "netherlands": "🇳🇱", "india": "🇮🇳",
+"hong kong": "🇭🇰", "singapore": "🇸🇬",
 }
 NATIONALITY_TO_COUNTRY = {
-    "american": "united states", "us": "united states", "united states": "united states",
-    "french": "france", "german": "germany", "belgian": "belgium", "norwegian": "norway",
-    "swedish": "sweden", "finnish": "finland", "danish": "denmark", "austrian": "austria",
-    "polish": "poland", "spanish": "spain", "portuguese": "portugal", "greek": "greece",
-    "italian": "italy", "hungarian": "hungary", "croatian": "croatia", "irish": "ireland",
-    "chinese": "china", "indian": "india", "hong kong": "hong kong", "hongkong": "hong kong",
-    "singaporean": "singapore", "dutch": "netherlands", "netherlands": "netherlands",
+"american": "united states", "us": "united states", "united states": "united states",
+"french": "france", "german": "germany", "belgian": "belgium", "norwegian": "norway",
+"swedish": "sweden", "finnish": "finland", "danish": "denmark", "austrian": "austria",
+"polish": "poland", "spanish": "spain", "portuguese": "portugal", "greek": "greece",
+"italian": "italy", "hungarian": "hungary", "croatian": "croatia", "irish": "ireland",
+"chinese": "china", "indian": "india", "hong kong": "hong kong", "hongkong": "hong kong",
+"singaporean": "singapore", "dutch": "netherlands", "netherlands": "netherlands",
 }
 SIGNAL_OPTIONS = ["International Director", "International Shareholder", "Owned By A Company"]
-
-# New constants for updated rating logic
-EXCLUDED_COUNTRIES = {"pakistan", "nigeria", "canada"}
-
-ELIGIBLE_FOREIGN_COUNTRIES = {
-    "united states",
-    "sweden", "norway", "finland", "denmark", "iceland",
-    "france", "germany", "belgium", "netherlands", "austria",
-    "poland", "spain", "portugal", "greece", "italy",
-    "hungary", "croatia", "ireland", "czechia", "czech republic",
-    "slovakia", "slovenia", "estonia", "latvia", "lithuania",
-    "romania", "bulgaria", "cyprus", "malta", "luxembourg",
-    "china", "hong kong", "singapore",
-}
-
-NAME_KEYWORDS = ["ai", "technology", "technologies", "labs", "group", "uk", "europe"]
-
-
 def apply_custom_css() -> None:
-    st.markdown(
-        """
-        <style>
-        [data-testid="stSidebar"][aria-expanded="true"] > div:first-child { width: 340px; }
-        div[data-testid="metric-container"] {
-            background: linear-gradient(180deg, rgba(14, 17, 23, 0.03), rgba(14, 17, 23, 0.01));
-            border: 1px solid rgba(120, 120, 120, 0.18); padding: 14px 16px; border-radius: 14px;
-        }
-        .signal-legend { display: flex; gap: 10px; flex-wrap: wrap; margin: 0.5rem 0 0.25rem 0; }
-        .signal-pill { border: 1px solid rgba(120, 120, 120, 0.2); border-radius: 999px; padding: 6px 10px; font-size: 0.85rem; background: rgba(49, 51, 63, 0.04); }
-        .app-note { padding: 0.85rem 1rem; border-radius: 12px; border: 1px solid rgba(120, 120, 120, 0.18); background: rgba(49, 51, 63, 0.04); margin-bottom: 1rem; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
+st.markdown(
+"""
+<style>
+[data-testid="stSidebar"][aria-expanded="true"] > div:first-child { width: 340px; }
+div[data-testid="metric-container"] {
+background: linear-gradient(180deg, rgba(14, 17, 23, 0.03), rgba(14, 17, 23, 0.01));
+border: 1px solid rgba(120, 120, 120, 0.18); padding: 14px 16px; border-radius: 14px;
+}
+.signal-legend { display: flex; gap: 10px; flex-wrap: wrap; margin: 0.5rem 0 0.25rem 0; }
+.signal-pill { border: 1px solid rgba(120, 120, 120, 0.2); border-radius: 999px; padding: 6px 10px; font-size: 0.85rem; background: rgba(49, 51, 63, 0.04); }
+.app-note { padding: 0.85rem 1rem; border-radius: 12px; border: 1px solid rgba(120, 120, 120, 0.18); background: rgba(49, 51, 63, 0.04); margin-bottom: 1rem; }
+</style>
+""",
+unsafe_allow_html=True,
+)
 def normalize_text(value: Any) -> str:
-    if value is None:
-        return ""
-    text = str(value).strip().lower().replace("-", " ")
-    text = re.sub(r"[^a-z0-9\s]", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    aliases = {
-        "usa": "united states", "u s a": "united states", "u s": "us",
-        "united states of america": "united states", "america": "american",
-        "hongkong": "hong kong", "the netherlands": "netherlands",
-    }
-    return aliases.get(text, text)
-
-
+if value is None:
+return ""
+text = str(value).strip().lower().replace("-", " ")
+text = re.sub(r"[^a-z0-9\s]", "", text)
+text = re.sub(r"\s+", " ", text).strip()
+aliases = {
+"usa": "united states", "u s a": "united states", "u s": "us",
+"united states of america": "united states", "america": "american",
+"hongkong": "hong kong", "the netherlands": "netherlands",
+}
+return aliases.get(text, text)
 NORMALIZED_COUNTRY_TERMS = {normalize_text(x) for x in COUNTRY_TERMS}
 NORMALIZED_ALLOWED_COMPANY_TYPES = {normalize_text(x) for x in ALLOWED_COMPANY_TYPES}
-
-
 def canonical_country_from_value(value: Any) -> str:
-    norm = normalize_text(value)
-    if not norm:
-        return ""
-    if norm in NORMALIZED_COUNTRY_TERMS:
-        return "united states" if norm == "usa" else norm
-    return NATIONALITY_TO_COUNTRY.get(norm, "")
-
-
+norm = normalize_text(value)
+if not norm:
+return ""
+if norm in NORMALIZED_COUNTRY_TERMS:
+return "united states" if norm == "usa" else norm
+return NATIONALITY_TO_COUNTRY.get(norm, "")
 def dedupe_preserve_order(values: List[str]) -> List[str]:
-    out: List[str] = []
-    seen = set()
-    for value in values:
-        norm = normalize_text(value)
-        if norm and norm not in seen:
-            seen.add(norm)
-            out.append(value)
-    return out
-
-
+out: List[str] = ]
+seen = set()
+for value in values:
+norm = normalize_text(value)
+if norm and norm not in seen:
+seen.add(norm)
+out.append(value)
+return out
 def country_label(value: str) -> str:
-    if value == "united states":
-        return "USA"
-    if value == "hong kong":
-        return "Hong Kong"
-    return value.title()
-
-
+if value == "united states":
+return "USA"
+if value == "hong kong":
+return "Hong Kong"
+return value.title()
 def format_flagged_countries(values: List[str]) -> str:
-    countries = dedupe_preserve_order([canonical_country_from_value(v) for v in values if canonical_country_from_value(v)])
-    return " | ".join(f"✓ {COUNTRY_FLAG_MAP.get(v, '🌍')} {country_label(v)}" for v in countries)
-
-
+countries = dedupe_preserve_order([canonical_country_from_value(v) for v in values if canonical_country_from_value(v)])
+return " | ".join(f"✓ {COUNTRY_FLAG_MAP.get(v, '🌍')} {country_label(v)}" for v in countries)
 def extract_country_flags(values: List[str]) -> List[str]:
-    countries = dedupe_preserve_order([canonical_country_from_value(v) for v in values if canonical_country_from_value(v)])
-    return [COUNTRY_FLAG_MAP[v] for v in countries if v in COUNTRY_FLAG_MAP]
-
-
+countries = dedupe_preserve_order([canonical_country_from_value(v) for v in values if canonical_country_from_value(v)])
+return [COUNTRY_FLAG_MAP[v] for v in countries if v in COUNTRY_FLAG_MAP]
 def make_company_profile_url(company_number: str, company_name: str) -> str:
-    return f"https://find-and-update.company-information.service.gov.uk/company/{company_number}#{quote(company_name or 'company')}"
-
-
+return f"https://find-and-update.company-information.service.gov.uk/company/{company_number}#{quote(company_name}"
 def make_google_funding_search_url(company_name: str) -> str:
-    clean_name = re.sub(
-        r"\s+(?:ltd|limited)\.?\s*$",
-        "",
-        str(company_name or ""),
-        flags=re.IGNORECASE,
-    ).strip()
-    return f"https://www.google.com/search?q={quote(f'{clean_name} funding')}"
-
-
+clean_name = re.sub(
+r"\s+(?:ltd|limited).?\s*$",
+"",
+str(company_name or ""),
+flags=re.IGNORECASE,
+).strip()
+return f"https://www.google.com/search?q={quote(f'{clean_name}
 class CHClient:
-    def __init__(self, api_keys: List[str]):
-        self.api_keys = [key.strip() for key in api_keys if str(key).strip()]
-        if not self.api_keys:
-            raise ValueError("No Companies House API keys supplied.")
-        self.idx = 0
-        self.session = requests.Session()
-
+def _init_(self, api_keys: List[str]):
+self.api_keys = [key.strip() for key in api_keys if str(key).strip()]
+if not self.api_keys:
+raise ValueError("No Companies House API keys supplied.")
+self.idx = 0
+self.session = requests.Session()
     def _auth(self) -> Tuple[str, str]:
-        return self.api_keys[self.idx % len(self.api_keys)], ""
-
+return self.api_keys[self.idx % len(self.api_keys)], ""
     def _rotate(self) -> None:
-        self.idx = (self.idx + 1) % len(self.api_keys)
-
+self.idx = (self.idx + 1) % len(self.api_keys)
     def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        last_error = "Unknown error"
-        for _ in range(max(len(self.api_keys) * 3, 3)):
-            try:
-                response = self.session.get(
-                    f"{BASE_URL}{path}", params=params, auth=self._auth(), timeout=30,
-                    headers={"Accept": "application/json"},
-                )
-                if response.status_code == 404:
-                    return {}
-                if response.status_code in (401, 403, 429):
-                    last_error = f"HTTP {response.status_code}"
-                    self._rotate()
-                    time.sleep(0.5)
-                    continue
-                response.raise_for_status()
-                return response.json()
-            except requests.RequestException as exc:
-                last_error = str(exc)
-                self._rotate()
-                time.sleep(0.5)
-        raise RuntimeError(f"Companies House API request failed after retries: {last_error}")
-
-
+last_error = "Unknown error"
+for _ in range(max(len(self.api_keys) * 3, 3)):
+try:
+response = self.session.get(
+f"{BASE_URL}{path}", params=params, auth=self._auth(), timeout=30,
+headers={"Accept": "application/json"},
+)
+if response.status_code == 404:
+return {}
+if response.status_code in (401, 403, 429):
+last_error = f"HTTP {response.status_code}"
+self._rotate()
+time.sleep(0.5)
+continue
+response.raise_for_status()
+return response.json()
+except requests.RequestException as exc:
+last_error = str(exc)
+self._rotate()
+time.sleep(0.5)
+raise RuntimeError(f"Companies House API request failed after retries: {last_error}")
 def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    if column not in existing:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-        conn.commit()
-
-
+existing = {row for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+if column not in existing:
+conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+conn.commit()
 def init_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS screened_companies (
-            company_number TEXT PRIMARY KEY,
-            company_name TEXT,
-            sic_code TEXT,
-            incorporation_date TEXT,
-            company_type TEXT,
-            international_director INTEGER,
-            international_shareholder INTEGER,
-            owned_by_company INTEGER,
-            pulled_at TEXT,
-            raw_json TEXT
-        )
-        """
-    )
-    conn.commit()
-    ensure_column(conn, "screened_companies", "international_director_detail", "TEXT")
-    ensure_column(conn, "screened_companies", "international_shareholder_detail", "TEXT")
-    ensure_column(conn, "screened_companies", "owner_company_name", "TEXT")
-    ensure_column(conn, "screened_companies", "profile_url", "TEXT")
-    ensure_column(conn, "screened_companies", "shortlisted", "INTEGER DEFAULT 0")
-    ensure_column(conn, "screened_companies", "target_sic", "INTEGER DEFAULT 0")
-    ensure_column(conn, "screened_companies", "target_address", "INTEGER DEFAULT 0")
-    ensure_column(conn, "screened_companies", "target_address_detail", "TEXT")
-    ensure_column(conn, "screened_companies", "target_indicators", "TEXT")
-
-    # New columns for updated rating logic
-    ensure_column(conn, "screened_companies", "rating", "TEXT")
-    ensure_column(conn, "screened_companies", "director_count", "INTEGER DEFAULT 0")
-    ensure_column(conn, "screened_companies", "has_company_psc", "INTEGER DEFAULT 0")
-    ensure_column(conn, "screened_companies", "has_any_psc", "INTEGER DEFAULT 0")
-    ensure_column(conn, "screened_companies", "eligible_foreign_director_countries", "TEXT")
-
-    return conn
-
-
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+conn.execute(
+"""
+CREATE TABLE IF NOT EXISTS screened_companies (
+company_number TEXT PRIMARY KEY,
+company_name TEXT,
+sic_code TEXT,
+incorporation_date TEXT,
+company_type TEXT,
+international_director INTEGER,
+international_shareholder INTEGER,
+owned_by_company INTEGER,
+pulled_at TEXT,
+raw_json TEXT
+)
+"""
+)
+conn.commit()
+ensure_column(conn, "screened_companies", "international_director_detail", "TEXT")
+ensure_column(conn, "screened_companies", "international_shareholder_detail", "TEXT")
+ensure_column(conn, "screened_companies", "owner_company_name", "TEXT")
+ensure_column(conn, "screened_companies", "profile_url", "TEXT")
+ensure_column(conn, "screened_companies", "shortlisted", "INTEGER DEFAULT 0")
+ensure_column(conn, "screened_companies", "target_sic", "INTEGER DEFAULT 0")
+ensure_column(conn, "screened_companies", "target_address", "INTEGER DEFAULT 0")
+ensure_column(conn, "screened_companies", "target_address_detail", "TEXT")
+ensure_column(conn, "screened_companies", "target_indicators", "TEXT")
+return conn
 def existing_company_numbers(conn: sqlite3.Connection, start_date: str, end_date: str) -> set:
-    rows = conn.execute(
-        "SELECT company_number FROM screened_companies WHERE incorporation_date BETWEEN ? AND ?",
-        (start_date, end_date),
-    ).fetchall()
-    return {row[0] for row in rows}
-
-
+rows = conn.execute(
+"SELECT company_number FROM screened_companies WHERE incorporation_date BETWEEN ? AND ?",
+(start_date, end_date),
+).fetchall()
+return {row for row in rows}
 def set_shortlisted_state(conn: sqlite3.Connection, company_number: str, shortlisted: bool) -> None:
-    conn.execute("UPDATE screened_companies SET shortlisted = ? WHERE company_number = ?", (int(shortlisted), company_number))
-    conn.commit()
-
-
+conn.execute("UPDATE screened_companies SET shortlisted = ? WHERE company_number = ?", (int(shortlisted), company_number))
+conn.commit()
 def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
-    rating = row.get("rating", "")
-    if not rating:
-        # Fallback: ensure every row has at least a minimal rating
-        rating = "⭐"
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO screened_companies (
-            company_number, company_name, sic_code, incorporation_date, company_type,
-            international_director, international_director_detail,
-            international_shareholder, international_shareholder_detail,
-            owned_by_company, owner_company_name, pulled_at, raw_json,
-            profile_url, shortlisted, target_sic, target_address,
-            target_address_detail, target_indicators,
-            rating, director_count, has_company_psc, has_any_psc, eligible_foreign_director_countries
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            row["company_number"], row["company_name"], row["sic_code"], row["incorporation_date"], row["company_type"],
-            int(row["international_director"]), row.get("international_director_detail", ""),
-            int(row["international_shareholder"]), row.get("international_shareholder_detail", ""),
-            int(row["owned_by_company"]), row.get("owner_company_name", ""), row["pulled_at"],
-            json.dumps(row.get("raw_json", {})), row.get("profile_url", ""), int(row.get("shortlisted", False)),
-            int(row.get("target_sic", False)), int(row.get("target_address", False)),
-            row.get("target_address_detail", ""), row.get("target_indicators", ""),
-            rating, row.get("director_count", 0), int(row.get("has_company_psc", False)),
-            int(row.get("has_any_psc", False)), json.dumps(row.get("eligible_foreign_director_countries", [])),
-        ),
-    )
-    conn.commit()
-
-
+conn.execute(
+"""
+INSERT OR REPLACE INTO screened_companies (
+company_number, company_name, sic_code, incorporation_date, company_type,
+international_director, international_director_detail,
+international_shareholder, international_shareholder_detail,
+owned_by_company, owner_company_name, pulled_at, raw_json,
+profile_url, shortlisted, target_sic, target_address,
+target_address_detail, target_indicators
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+""",
+(
+row["company_number"], row["company_name"], row["sic_code"], row["incorporation_date"], row["company_type"],
+int(row["international_director"]), row.get("international_director_detail", ""),
+int(row["international_shareholder"]), row.get("international_shareholder_detail", ""),
+int(row["owned_by_company"]), row.get("owner_company_name", ""), row["pulled_at"],
+json.dumps(row.get("raw_json", {})), row.get("profile_url", ""), int(row.get("shortlisted", False)),
+int(row.get("target_sic", False)), int(row.get("target_address", False)),
+row.get("target_address_detail", ""), row.get("target_indicators", ""),
+),
+)
+conn.commit()
 def read_db_rows(conn: sqlite3.Connection, start_date: str, end_date: str) -> pd.DataFrame:
-    return pd.read_sql_query(
-        "SELECT * FROM screened_companies WHERE incorporation_date BETWEEN ? AND ? ORDER BY pulled_at DESC",
-        conn,
-        params=(start_date, end_date),
-    )
-
-
+return pd.read_sql_query(
+"SELECT * FROM screened_companies WHERE incorporation_date BETWEEN ? AND ? ORDER BY pulled_at DESC",
+conn,
+params=(start_date, end_date),
+)
 def validate_api_keys() -> List[str]:
-    if "COMPANIES_HOUSE_API_KEYS" not in st.secrets:
-        raise ValueError("Missing COMPANIES_HOUSE_API_KEYS in .streamlit/secrets.toml")
-    keys = [str(key).strip() for key in list(st.secrets["COMPANIES_HOUSE_API_KEYS"]) if str(key).strip()]
-    if not keys:
-        raise ValueError("COMPANIES_HOUSE_API_KEYS is empty")
-    return keys
-
-
+if "COMPANIES_HOUSE_API_KEYS" not in st.secrets:
+raise ValueError("Missing COMPANIES_HOUSE_API_KEYS in .streamlit/secrets.toml")
+keys = [str(key).strip() for key in list(st.secrets["COMPANIES_HOUSE_API_KEYS"]) if str(key).strip()]
+if not keys:
+raise ValueError("COMPANIES_HOUSE_API_KEYS is empty")
+return keys
 def paged_get_items(client: CHClient, path: str, page_size: int, extra_params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    items: List[Dict[str, Any]] = []
-    start_index = 0
-    while True:
-        params: Dict[str, Any] = {"start_index": start_index}
-        if extra_params:
-            params.update(extra_params)
-        params["size" if path == "/advanced-search/companies" else "items_per_page"] = page_size
-        payload = client.get(path, params=params)
-        batch = payload.get("items", []) or []
-        items.extend(batch)
-        total = int(payload.get("total_results") or payload.get("total_count") or len(items))
-        start_index += page_size
-        if not batch or start_index >= total:
-            break
-    return items
-
-
+items: List[Dict[str, Any]] = ]
+start_index = 0
+while True:
+params: Dict[str, Any] = {"start_index": start_index}
+if extra_params:
+params.update(extra_params)
+params["size" if path == "/advanced-search/companies" else "items_per_page"] = page_size
+payload = client.get(path, params=params)
+batch = payload.get("items", []) or ]
+items.extend(batch)
+total = int(payload.get("total_results") or payload.get("total_count") or len(items))
+start_index += page_size
+if not batch or start_index >= total:
+break
+return items
 def is_allowed_company_type(value: Any) -> bool:
-    return normalize_text(value) in NORMALIZED_ALLOWED_COMPANY_TYPES
-
-
+return normalize_text(value) in NORMALIZED_ALLOWED_COMPANY_TYPES
 def search_new_companies(client: CHClient, start_date: str, end_date: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    params = {
-        "incorporated_from": start_date,
-        "incorporated_to": end_date,
-        "company_status": "active",
-        "company_type": ",".join(ALLOWED_COMPANY_TYPES),
-        "sic_codes": ",".join(ALL_ALLOWED_SIC_CODES),
-    }
-    items = paged_get_items(client, "/advanced-search/companies", SEARCH_PAGE_SIZE, params)
-    filtered = [
-        item for item in items
-        if any(str(code) in ALL_ALLOWED_SIC_CODES for code in (item.get("sic_codes") or []))
-        and item.get("company_status", "").lower() == "active"
-        and is_allowed_company_type(item.get("company_type", ""))
-    ]
-    deduped = {item["company_number"]: item for item in filtered if item.get("company_number")}
-    return list(deduped.values()), {
-        "raw_results": len(items), "filtered_results": len(filtered), "deduped_results": len(deduped),
-        "company_types_sent": ", ".join(ALLOWED_COMPANY_TYPES), "sic_count": len(ALL_ALLOWED_SIC_CODES),
-    }
-
-
+params = {
+"incorporated_from": start_date,
+"incorporated_to": end_date,
+"company_status": "active",
+"company_type": ",".join(ALLOWED_COMPANY_TYPES),
+"sic_codes": ",".join(ALL_ALLOWED_SIC_CODES),
+}
+items = paged_get_items(client, "/advanced-search/companies", SEARCH_PAGE_SIZE, params)
+filtered = [
+item for item in items
+if any(str(code) in ALL_ALLOWED_SIC_CODES for code in (item.get("sic_codes") or []))
+and item.get("company_status", "").lower() == "active"
+and is_allowed_company_type(item.get("company_type", ""))
+]
+deduped = {item["company_number"]: item for item in filtered if item.get("company_number")}
+return list(deduped.values()), {
+"raw_results": len(items), "filtered_results": len(filtered), "deduped_results": len(deduped),
+"company_types_sent": ", ".join(ALLOWED_COMPANY_TYPES), "sic_count": len(ALL_ALLOWED_SIC_CODES),
+}
 def get_all_officers(client: CHClient, company_number: str) -> List[Dict[str, Any]]:
-    return paged_get_items(client, f"/company/{company_number}/officers", OFFICERS_PAGE_SIZE)
-
-
+return paged_get_items(client, f"/company/{company_number}/officers", OFFICERS_PAGE_SIZE)
 def get_all_pscs(client: CHClient, company_number: str) -> List[Dict[str, Any]]:
-    return paged_get_items(client, f"/company/{company_number}/persons-with-significant-control", PSC_PAGE_SIZE)
-
-
-def is_eu_country(country: str) -> bool:
-    eu = {
-        "france", "germany", "belgium", "netherlands", "austria",
-        "poland", "spain", "portugal", "greece", "italy",
-        "hungary", "croatia", "ireland", "czechia", "czech republic",
-        "slovakia", "slovenia", "estonia", "latvia", "lithuania",
-        "romania", "bulgaria", "cyprus", "malta", "luxembourg",
-    }
-    return country.lower() in eu
-
-
-def is_eligible_foreign_country(country: str) -> bool:
-    norm = normalize_text(country)
-    if not norm:
-        return False
-    if norm in EXCLUDED_COUNTRIES:
-        return False
-    return norm in ELIGIBLE_FOREIGN_COUNTRIES
-
-
-def name_keyword_score(company_name: str) -> int:
-    text = normalize_text(company_name or "")
-    score = 0
-    for kw in NAME_KEYWORDS:
-        if kw in text:
-            score += 1
-    return score
-
-
-def collect_international_director_details(client: CHClient, company_number: str) -> Tuple[bool, List[str], int, List[str]]:
-    """
-    Returns:
-      - has_international_director: bool (any eligible foreign director)
-      - director_details: list of country labels for display (eligible foreign only)
-      - director_count: total number of directors (all countries)
-      - eligible_foreign_director_countries: list of normalized country strings for eligible foreign directors
-    """
-    director_matches: List[str] = []
-    eligible_foreign_director_countries: List[str] = []
-    director_count = 0
-
-    for officer in get_all_officers(client, company_number):
-        role = normalize_text(officer.get("officer_role", ""))
-        if "director" not in role and role != "designated member":
-            continue
-        director_count += 1
-
-        # Prefer country_of_residence, then address country, then nationality
-        country_value = None
-        for value in [officer.get("country_of_residence"), (officer.get("address") or {}).get("country"), officer.get("nationality")]:
-            if value:
-                country_value = value
-                break
-
-        if not country_value:
-            continue
-
-        country_canon = canonical_country_from_value(country_value)
-        if not country_canon:
-            continue
-
-        # Exclude Pakistan, Nigeria, Canada from contributing to flags/rating
-        if normalize_text(country_canon) in EXCLUDED_COUNTRIES:
-            continue
-
-        if is_eligible_foreign_country(country_canon):
-            director_matches.append(str(country_value))
-            eligible_foreign_director_countries.append(country_canon)
-
-    director_matches = dedupe_preserve_order(director_matches)
-    eligible_foreign_director_countries = dedupe_preserve_order(eligible_foreign_director_countries)
-    has_international_director = bool(eligible_foreign_director_countries)
-    return has_international_director, director_matches, director_count, eligible_foreign_director_countries
-
-
-def analyse_psc_flags(client: CHClient, company_number: str) -> Tuple[bool, List[str], bool, List[str], bool]:
-    """
-    Returns:
-      - has_international_shareholder: bool (any PSC with eligible foreign country)
-      - shareholder_matches: list of country labels for display
-      - has_company_psc: bool (any PSC that is a company/legal-person/corporate)
-      - owner_names: list of owner company names
-      - has_any_psc: bool (any PSC at all, corporate or individual)
-    """
-    shareholder_matches: List[str] = []
-    owner_names: List[str] = []
-    has_company_psc = False
-    has_any_psc = False
-
-    for psc in get_all_pscs(client, company_number):
-        has_any_psc = True
-        kind = str(psc.get("kind", ""))
-
-        # Corporate / legal-person PSC
-        if kind in COMPANY_OWNER_KINDS or "corporate" in kind or "legal-person" in kind:
-            has_company_psc = True
-            name = str(psc.get("name") or "").strip()
-            if name:
-                owner_names.append(name)
-
-        # Country checks for individuals or entities
-        for value in [psc.get("country_of_residence"), (psc.get("address") or {}).get("country"), psc.get("nationality")]:
-            if not value:
-                continue
-            country_canon = canonical_country_from_value(value)
-            if not country_canon:
-                continue
-            if normalize_text(country_canon) in EXCLUDED_COUNTRIES:
-                continue
-            if is_eligible_foreign_country(country_canon):
-                shareholder_matches.append(str(value))
-
-    shareholder_matches = dedupe_preserve_order(shareholder_matches)
-    owner_names = dedupe_preserve_order(owner_names)
-    has_international_shareholder = bool(shareholder_matches)
-    return has_international_shareholder, shareholder_matches, has_company_psc, owner_names, has_any_psc
-
-
+return paged_get_items(client, f"/company/{company_number}/persons-with-significant-control", PSC_PAGE_SIZE)
+def collect_international_director_details(client: CHClient, company_number: str) -> Tuple[bool, List[str], int]:
+matches: List[str] = ]
+director_count = 0
+for officer in get_all_officers(client, company_number):
+role = normalize_text(officer.get("officer_role"))
+if "director" not in role and role != "designated member":
+continue
+director_count += 1
+for value in [officer.get("country_of_residence"), (officer.get("address") or {}).get("country"), officer.get("nationality")]:
+if canonical_country_from_value(value):
+matches.append(str(value))
+matches = dedupe_preserve_order(matches)
+return bool(matches), matches, director_count
+def analyse_psc_flags(client: CHClient, company_number: str) -> Tuple[bool, List[str], bool, List[str]]:
+shareholder_matches: List[str] = ]
+owner_names: List[str] = ]
+for psc in get_all_pscs(client, company_number):
+kind = str(psc.get("kind", ""))
+for value in [psc.get("country_of_residence"), (psc.get("address") or {}).get("country"), psc.get("nationality")]:
+if canonical_country_from_value(value):
+shareholder_matches.append(str(value))
+if kind in COMPANY_OWNER_KINDS or "corporate" in kind or "legal-person" in kind:
+name = str(psc.get("name") or "").strip()
+if name:
+owner_names.append(name)
+shareholder_matches = dedupe_preserve_order(shareholder_matches)
+owner_names = dedupe_preserve_order(owner_names)
+return bool(shareholder_matches), shareholder_matches, bool(owner_names), owner_names
 def parse_matching_sic(item: Dict[str, Any]) -> str:
-    codes = [str(code) for code in (item.get("sic_codes") or [])]
-    return ", ".join([code for code in codes if code in ALL_ALLOWED_SIC_CODES] or codes[:1])
-
-
+codes = [str(code) for code in (item.get("sic_codes") or [])]
+return ", ".join([code for code in codes if code in ALL_ALLOWED_SIC_CODES] or codes[:1])
 def is_target_sic(item: Dict[str, Any]) -> bool:
-    return any(str(code) in TARGET_SIC_CODES for code in (item.get("sic_codes") or []))
-
-
+return any(str(code) in TARGET_SIC_CODES for code in (item.get("sic_codes") or []))
 def has_bonus_star(values: List[str]) -> bool:
-    return bool({canonical_country_from_value(value) for value in values} & BONUS_STAR_COUNTRIES)
-
-
+return bool({canonical_country_from_value(value) for value in values} & BONUS_STAR_COUNTRIES)
 def is_target_address(item: Dict[str, Any]) -> Tuple[bool, str]:
-    address = item.get("registered_office_address") or item.get("address") or {}
-    country = canonical_country_from_value(address.get("country"))
-    if country:
-        return True, f"✓ {COUNTRY_FLAG_MAP.get(country, '🏠')} {country_label(country)}"
-    return False, ""
-
-
+address = item.get("registered_office_address") or item.get("address") or {}
+country = canonical_country_from_value(address.get("country"))
+if country:
+return True, f"✓ {COUNTRY_FLAG_MAP.get(country, '🏠')} {country_label(country)}"
+return False, ""
 def build_target_indicators(target_sic: bool, target_address: bool, director_details: List[str], shareholder_details: List[str], director_count: int) -> str:
-    indicators: List[str] = []
-    if target_sic:
-        indicators.append("🎯")
-    if target_address:
-        indicators.append("🏠")
-    for flag in extract_country_flags(director_details) + extract_country_flags(shareholder_details):
-        if flag not in indicators:
-            indicators.append(flag)
-    if director_count >= 2:
-        indicators.append({2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"}.get(min(director_count, 10), "#️⃣"))
-    return " ".join(indicators)
-
-
+indicators: List[str] = ]
+if target_sic:
+indicators.append("🎯")
+if target_address:
+indicators.append("🏠")
+for flag in extract_country_flags(director_details) + extract_country_flags(shareholder_details):
+if flag not in indicators:
+indicators.append(flag)
+if director_count >= 2:
+indicators.append({2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"}.get(min(director_count, 10), "#️⃣"))
+return " ".join(indicators)
 def build_rating(international_director: bool, international_shareholder: bool, owned_by_company: bool, target_sic: bool, director_details: List[str], shareholder_details: List[str]) -> str:
-    # Legacy function kept for reference; not used in new logic
-    stars = sum([international_director, international_shareholder, owned_by_company, target_sic])
-    if has_bonus_star(director_details) or has_bonus_star(shareholder_details):
-        stars += 1
-    return "⭐" * stars
-
-
-def build_rating_new(
-    company_name: str,
-    director_count: int,
-    eligible_foreign_director_countries: List[str],
-    has_company_psc: bool,
-    has_any_psc: bool,
-) -> str:
-    """
-    New rating rules:
-
-    Base stars:
-    - +1 if has a PSC that is a company (has_company_psc)
-    - +1 per eligible foreign director (US/EU/China/HK/SG), each director counts once
-    - +1 per name keyword match (AI, Technology, Technologies, Labs, Group, UK, Europe)
-    - +1 per director above 1 (i.e. max(0, director_count - 1))
-
-    Minimum floors:
-    - If director_count > 2 (i.e. 3+) and at least one eligible foreign director: min 5★
-    - If director_count > 3 (i.e. 4+) and at least one eligible foreign director: min 6★
-    - If director_count > 2 (i.e. 3+) and at least one eligible foreign director and has_company_psc: min 7★
-    - If has_company_psc: min 3★
-    """
-    stars = 0
-
-    # 1. Company PSC
-    if has_company_psc:
-        stars += 1
-
-    # 2. Eligible foreign directors (1 star per director, not per country)
-    num_eligible_foreign_directors = len(eligible_foreign_director_countries)
-    stars += num_eligible_foreign_directors
-
-    # 3. Name keywords
-    stars += name_keyword_score(company_name)
-
-    # 4. Extra directors above 1
-    if director_count > 1:
-        stars += director_count - 1
-
-    # Apply minimum floors
-
-    has_eligible_foreign = num_eligible_foreign_directors > 0
-
-    # 3+ directors + at least one eligible foreign → min 5★
-    if director_count > 2 and has_eligible_foreign:
-        stars = max(stars, 5)
-
-    # 4+ directors + at least one eligible foreign → min 6★
-    if director_count > 3 and has_eligible_foreign:
-        stars = max(stars, 6)
-
-    # 3+ directors + at least one eligible foreign + company PSC → min 7★
-    if director_count > 2 and has_eligible_foreign and has_company_psc:
-        stars = max(stars, 7)
-
-    # Any company PSC → min 3★
-    if has_company_psc:
-        stars = max(stars, 3)
-
-    # Fallback: ensure at least 1★ for any real company
-    if stars == 0:
-        stars = 1
-
-    return "⭐" * stars
-
-
+stars = sum([international_director, international_shareholder, owned_by_company, target_sic])
+if has_bonus_star(director_details) or has_bonus_star(shareholder_details):
+stars += 1
+return "⭐" * stars
 def process_company(client: CHClient, item: Dict[str, Any]) -> Dict[str, Any]:
-    company_number = item.get("company_number", "")
-    company_name = item.get("company_name") or item.get("title") or ""
-
-    # Normalize incorporation date to YYYY-MM-DD
-    inc_date_raw = item.get("date_of_creation", "")
-    inc_date = inc_date_raw[:10] if inc_date_raw else ""
-
-    # Directors
-    international_director, director_details, director_count, eligible_foreign_director_countries = collect_international_director_details(client, company_number)
-
-    # PSCs
-    international_shareholder, shareholder_details, has_company_psc, owner_names, has_any_psc = analyse_psc_flags(client, company_number)
-
-    target_sic = is_target_sic(item)
-    target_address, target_address_detail = is_target_address(item)
-
-    # Build display strings
-    director_detail_str = format_flagged_countries(director_details)
-    shareholder_detail_str = format_flagged_countries(shareholder_details)
-    owner_company_str = " | ".join(f"✓ {name}" for name in owner_names) if owner_names else ""
-
-    # New rating – with explicit fallback
-    try:
-        rating = build_rating_new(
-            company_name=company_name,
-            director_count=director_count,
-            eligible_foreign_director_countries=eligible_foreign_director_countries,
-            has_company_psc=has_company_psc,
-            has_any_psc=has_any_psc,
-        )
-    except Exception:
-        rating = "⭐"
-
-    return {
-        "company_number": company_number,
-        "company_name": company_name,
-        "sic_code": parse_matching_sic(item),
-        "incorporation_date": inc_date,
-        "company_type": item.get("company_type", ""),
-        "international_director": international_director,
-        "international_director_detail": director_detail_str,
-        "international_shareholder": international_shareholder,
-        "international_shareholder_detail": shareholder_detail_str,
-        "owned_by_company": has_company_psc,
-        "owner_company_name": owner_company_str,
-        "pulled_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "raw_json": item,
-        "profile_url": make_company_profile_url(company_number, company_name),
-        "shortlisted": False,
-        "target_sic": target_sic,
-        "target_address": target_address,
-        "target_address_detail": target_address_detail,
-        "target_indicators": build_target_indicators(target_sic, target_address, director_details, shareholder_details, director_count),
-        "rating": rating,
-        "director_count": director_count,
-        "has_company_psc": has_company_psc,
-        "has_any_psc": has_any_psc,
-        "eligible_foreign_director_countries": eligible_foreign_director_countries,
-    }
-
-
+company_number = item.get("company_number", "")
+company_name = item.get("company_name") or item.get("title") or ""
+international_director, director_details, director_count = collect_international_director_details(client, company_number)
+international_shareholder, shareholder_details, owned_by_company, owner_names = analyse_psc_flags(client, company_number)
+target_sic = is_target_sic(item)
+target_address, target_address_detail = is_target_address(item)
+return {
+"company_number": company_number,
+"company_name": company_name,
+"sic_code": parse_matching_sic(item),
+"incorporation_date": item.get("date_of_creation", ""),
+"company_type": item.get("company_type", ""),
+"international_director": international_director,
+"international_director_detail": format_flagged_countries(director_details),
+"international_shareholder": international_shareholder,
+"international_shareholder_detail": format_flagged_countries(shareholder_details),
+"owned_by_company": owned_by_company,
+"owner_company_name": " | ".join(f"✓ {name}" for name in owner_names),
+"pulled_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+"raw_json": item,
+"profile_url": make_company_profile_url(company_number, company_name),
+"shortlisted": False,
+"target_sic": target_sic,
+"target_address": target_address,
+"target_address_detail": target_address_detail,
+"target_indicators": build_target_indicators(target_sic, target_address, director_details, shareholder_details, director_count),
+}
 def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
-    columns = [
-        "Company Name", "Google Funding Search", "Shortlist", "Incorporation Date", "Target SIC", "Rating",
-        "Target Indicators", "SIC Code", "Signals", "International Director", "International Shareholder",
-        "Owned By A Company", "Profile", "Pulled At", "company_number",
-    ]
-    if db_df.empty:
-        return pd.DataFrame(columns=columns)
-
-    rows = []
-    for _, row in db_df.iterrows():
-        director_values = [value.strip() for value in str(row.get("international_director_detail", "")).split("|") if value.strip()]
-        shareholder_values = [value.strip() for value in str(row.get("international_shareholder_detail", "")).split("|") if value.strip()]
-
-        signals = []
-        for flag in extract_country_flags(director_values) + extract_country_flags(shareholder_values):
-            if flag not in signals:
-                signals.append(flag)
-        if str(row.get("owner_company_name", "")).startswith("✓"):
-            signals.append("🏢")
-
-        company_name = row.get("company_name", "")
-
-        rating = row.get("rating", "")
-        if not rating or not isinstance(rating, str) or not rating.strip():
-            # Fallback for old rows or NULLs
-            rating = "⭐"
-
-        rows.append({
-            "Company Name": company_name,
-            "Google Funding Search": make_google_funding_search_url(company_name),
-            "Shortlist": bool(row.get("shortlisted", 0)),
-            "Incorporation Date": row.get("incorporation_date", ""),
-            "Target SIC": "🎯" if bool(row.get("target_sic", 0)) else "",
-            "Rating": rating,
-            "Target Indicators": row.get("target_indicators", ""),
-            "SIC Code": row.get("sic_code", ""),
-            "Signals": " ".join(signals),
-            "International Director": row.get("international_director_detail", ""),
-            "International Shareholder": row.get("international_shareholder_detail", ""),
-            "Owned By A Company": row.get("owner_company_name", ""),
-            "Profile": row.get("profile_url", ""),
-            "Pulled At": row.get("pulled_at", ""),
-            "company_number": row.get("company_number", ""),
-        })
-
-    return pd.DataFrame(rows, columns=columns)
-
-
+columns = [
+"Company Name", "Google Funding Search", "Shortlist", "Incorporation Date", "Target SIC", "Rating",
+"Target Indicators", "SIC Code", "Signals", "International Director", "International Shareholder",
+"Owned By A Company", "Profile", "Pulled At", "company_number",
+]
+if db_df.empty:
+return pd.DataFrame(columns=columns)
+rows = ]
+for _, row in db_df.iterrows():
+director_values = [value.strip() for value in str(row.get("international_director_detail", "")).split("|") if value.strip()]
+shareholder_values = [value.strip() for value in str(row.get("international_shareholder_detail", "")).split("|") if value.strip()]
+signals = ]
+for flag in extract_country_flags(director_values) + extract_country_flags(shareholder_values):
+if flag not in signals:
+signals.append(flag)
+if str(row.get("owner_company_name", "")).startswith("✓"):
+signals.append("🏢")
+company_name = row.get("company_name", "")
+rows.append({
+"Company Name": company_name,
+"Google Funding Search": make_google_funding_search_url(company_name),
+"Shortlist": bool(row.get("shortlisted", 0)),
+"Incorporation Date": row.get("incorporation_date", ""),
+"Target SIC": "🎯" if bool(row.get("target_sic", 0)) else "",
+"Rating": build_rating(bool(extract_country_flags(director_values)), bool(extract_country_flags(shareholder_values)), str(row.get("owner_company_name", "")).startswith("✓"), bool(row.get("target_sic", 0)), director_values, shareholder_values),
+"Target Indicators": row.get("target_indicators", ""),
+"SIC Code": row.get("sic_code", ""),
+"Signals": " ".join(signals),
+"International Director": row.get("international_director_detail", ""),
+"International Shareholder": row.get("international_shareholder_detail", ""),
+"Owned By A Company": row.get("owner_company_name", ""),
+"Profile": row.get("profile_url", ""),
+"Pulled At": row.get("pulled_at", ""),
+"company_number": row.get("company_number", ""),
+})
+return pd.DataFrame(rows, columns=columns)
 def apply_filters(df: pd.DataFrame, only_flagged: bool, selected_signals: List[str], sic_search: str, company_name_search: str, shortlisted_only: bool, hide_mfg_wholesale: bool) -> pd.DataFrame:
-    filtered = df.copy()
-    if shortlisted_only:
-        filtered = filtered[filtered["Shortlist"]].copy()
-    if only_flagged:
-        mask = pd.Series(False, index=filtered.index)
-        if "International Director" in selected_signals:
-            mask |= filtered["International Director"].astype(str).str.startswith("✓", na=False)
-        if "International Shareholder" in selected_signals:
-            mask |= filtered["International Shareholder"].astype(str).str.startswith("✓", na=False)
-        if "Owned By A Company" in selected_signals:
-            mask |= filtered["Owned By A Company"].astype(str).str.startswith("✓", na=False)
-        filtered = filtered[mask].copy()
-    if sic_search.strip():
-        filtered = filtered[filtered["SIC Code"].astype(str).str.contains(re.escape(sic_search.strip()), case=False, na=False)].copy()
-    if company_name_search.strip():
-        filtered = filtered[filtered["Company Name"].astype(str).str.contains(re.escape(company_name_search.strip()), case=False, na=False)].copy()
-    if hide_mfg_wholesale:
-        filtered = filtered[~filtered["SIC Code"].astype(str).apply(lambda s: any(code.strip() in MANUFACTURING_WHOLESALE_SIC_CODES for code in s.split(",")))].copy()
-    return filtered
-
-
+filtered = df.copy()
+if shortlisted_only:
+filtered = filtered[filtered["Shortlist"]].copy()
+if only_flagged:
+mask = pd.Series(False, index=filtered.index)
+if "International Director" in selected_signals:
+mask |= filtered["International Director"].astype(str).str.startswith("✓", na=False)
+if "International Shareholder" in selected_signals:
+mask |= filtered["International Shareholder"].astype(str).str.startswith("✓", na=False)
+if "Owned By A Company" in selected_signals:
+mask |= filtered["Owned By A Company"].astype(str).str.startswith("✓", na=False)
+filtered = filtered[mask].copy()
+if sic_search.strip():
+filtered = filtered[filtered["SIC Code"].astype(str).str.contains(re.escape(sic_search.strip()), case=False, na=False)].copy()
+if company_name_search.strip():
+filtered = filtered[filtered["Company Name"].astype(str).str.contains(re.escape(company_name_search.strip()), case=False, na=False)].copy()
+if hide_mfg_wholesale:
+filtered = filtered[~filtered["SIC Code"].astype(str).apply(lambda s: any(code.strip() in MANUFACTURING_WHOLESALE_SIC_CODES for code in s.split(",")))].copy()
+return filtered
 def render_kpis(display_df: pd.DataFrame) -> None:
-    total = len(display_df)
-    director = int(display_df["International Director"].astype(str).str.startswith("✓", na=False).sum()) if total else 0
-    shareholder = int(display_df["International Shareholder"].astype(str).str.startswith("✓", na=False).sum()) if total else 0
-    flagged = int((display_df["International Director"].astype(str).str.startswith("✓", na=False) | display_df["International Shareholder"].astype(str).str.startswith("✓", na=False) | display_df["Owned By A Company"].astype(str).str.startswith("✓", na=False)).sum()) if total else 0
-    shortlisted = int(display_df["Shortlist"].sum()) if total else 0
-    target_sics = int(display_df["Target SIC"].eq("🎯").sum()) if total else 0
-    for column, label, value in zip(st.columns(6), ["Total Results", "Flagged Rows", "Intl Directors", "Intl Shareholders", "Target SICs", "Shortlisted"], [total, flagged, director, shareholder, target_sics, shortlisted]):
-        column.metric(label, f"{value:,}")
-
-
+total = len(display_df)
+director = int(display_df["International Director"].astype(str).str.startswith("✓", na=False).sum()) if total else 0
+shareholder = int(display_df["International Shareholder"].astype(str).str.startswith("✓", na=False).sum()) if total else 0
+flagged = int((display_df["International Director"].astype(str).str.startswith("✓", na=False) | display_df["International Shareholder"].astype(str).str.startswith("✓", na=False) | display_df["Owned By A Company"].astype(str).str.startswith("✓", na=False)).sum()) if total else 0
+shortlisted = int(display_df["Shortlist"].sum()) if total else 0
+target_sics = int(display_df["Target SIC"].eq("🎯").sum()) if total else 0
+for column, label, value in zip(st.columns(6), ["Total Results", "Flagged Rows", "Intl Directors", "Intl Shareholders", "Target SICs", "Shortlisted"], [total, flagged, director, shareholder, target_sics, shortlisted]):
+column.metric(label, f"{value:,}")
 def render_sidebar(default_start: date, default_end: date) -> Tuple[date, date, bool, List[str], str, str, bool, bool, bool]:
-    with st.sidebar:
-        st.header("Screening controls")
-        start_date = st.date_input("Incorporation date from", value=default_start, format="YYYY-MM-DD")
-        end_date = st.date_input("Incorporation date to", value=default_end, format="YYYY-MM-DD")
-        run = st.button("Pull new companies", type="primary", use_container_width=True)
-        st.divider()
-        st.subheader("Result filters")
-        only_flagged = st.checkbox("Show only flagged rows", value=False)
-        selected_signals = st.multiselect("Signals", options=SIGNAL_OPTIONS, default=SIGNAL_OPTIONS)
-        hide_mfg_wholesale = st.checkbox("Hide Manufacturing & Wholesale SICs", value=False)
-        sic_search = st.text_input("Filter by SIC code", placeholder="e.g. 62012")
-        company_name_search = st.text_input("Filter by company name", placeholder="e.g. Labs")
-        shortlisted_only = st.checkbox("Show shortlisted only", value=False)
-    return start_date, end_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only, hide_mfg_wholesale
-
-
+with st.sidebar:
+st.header("Screening controls")
+start_date = st.date_input("Incorporation date from", value=default_start, format="YYYY-MM-DD")
+end_date = st.date_input("Incorporation date to", value=default_end, format="YYYY-MM-DD")
+run = st.button("Pull new companies", type="primary", use_container_width=True)
+st.divider()
+st.subheader("Result filters")
+only_flagged = st.checkbox("Show only flagged rows", value=False)
+selected_signals = st.multiselect("Signals", options=SIGNAL_OPTIONS, default=SIGNAL_OPTIONS)
+hide_mfg_wholesale = st.checkbox("Hide Manufacturing & Wholesale SICs", value=False)
+sic_search = st.text_input("Filter by SIC code", placeholder="e.g. 62012")
+company_name_search = st.text_input("Filter by company name", placeholder="e.g. Labs")
+shortlisted_only = st.checkbox("Show shortlisted only", value=False)
+return start_date, end_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only, hide_mfg_wholesale
 def main() -> None:
-    apply_custom_css()
-    st.title("Companies House New Incorporations Screener")
-    st.caption("Pull newly incorporated active companies, screen target SIC codes, and enrich results with officer and PSC checks.")
-    st.markdown('<div class="app-note">Designed for rapid lead triage: select a date range, run the pull, filter signals, shortlist candidates, and open Companies House profiles.</div>', unsafe_allow_html=True)
-
+apply_custom_css()
+st.title("Companies House New Incorporations Screener")
+st.caption("Pull newly incorporated active companies, screen target SIC codes, and enrich results with officer and PSC checks.")
+st.markdown('<div class="app-note">Designed for rapid lead triage: select a date range, run the pull, filter signals, shortlist candidates, and open Companies House profiles.</div>', unsafe_allow_html=True)
     with st.expander("Secrets format", expanded=False):
-        st.code('COMPANIES_HOUSE_API_KEYS = [\n  "key-1",\n  "key-2"\n]', language="toml")
-
-    # DEBUG: environment & DB path
-    st.caption(f"DB path: {os.path.abspath(DB_PATH) if DB_PATH != ':memory:' else ':memory:'}")
-    st.caption(f"DB_PATH value: {DB_PATH!r}")
-
+st.code('COMPANIES_HOUSE_API_KEYS = [\n  "key-1",\n  "key-2"\n]', language="toml")
     try:
-        api_keys = validate_api_keys()
-    except Exception as exc:
-        st.error(str(exc))
-        st.stop()
-
+api_keys = validate_api_keys()
+except Exception as exc:
+st.error(str(exc))
+st.stop()
     conn = init_db()
-    client = CHClient(api_keys)
-    start_date, end_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only, hide_mfg_wholesale = render_sidebar(date.today(), date.today())
-
+client = CHClient(api_keys)
+start_date, end_date, run, selected_signals, sic_search, company_name_search, only_flagged, shortlisted_only, hide_mfg_wholesale = render_sidebar(date.today(), date.today())
     if start_date > end_date:
-        st.sidebar.error("The 'from' date must be on or before the 'to' date.")
-        st.stop()
-
+st.sidebar.error("The 'from' date must be on or before the 'to' date.")
+st.stop()
     start_date_str = start_date.isoformat()
-    end_date_str = end_date.isoformat()
-    range_label = start_date_str if start_date_str == end_date_str else f"{start_date_str} to {end_date_str}"
-
-    # DEBUG: DB state before screening
-    with st.expander("DEBUG CONTROLS: DB state before screening", expanded=False):
-        pre_df = read_db_rows(conn, start_date_str, end_date_str)
-        st.write(f"Rows in DB for {range_label} before screening: {len(pre_df)}")
-        if not pre_df.empty:
-            cols = [
-                "company_name", "company_number", "rating", "director_count",
-                "has_company_psc", "international_director", "international_shareholder",
-                "owned_by_company", "incorporation_date",
-            ]
-            available = [c for c in cols if c in pre_df.columns]
-            st.dataframe(pre_df[available].head(20))
-        else:
-            st.info("No rows in DB for this date range yet.")
-
+end_date_str = end_date.isoformat()
+range_label = start_date_str if start_date_str == end_date_str else f"{start_date_str} to {end_date_str}"
     if run:
-        failures: List[str] = []
-        sample_debug: List[Dict[str, Any]] = []
-
-        with st.status("Running Companies House screening...", expanded=True) as status:
-            st.write(f"Searching incorporation dates from {start_date_str} to {end_date_str}.")
-            companies, diagnostics = search_new_companies(client, start_date_str, end_date_str)
-            already_seen = existing_company_numbers(conn, start_date_str, end_date_str)
-            new_companies = [company for company in companies if company.get("company_number") not in already_seen]
-            st.write(f"Raw search results: {diagnostics['raw_results']}")
-            st.write(f"Filtered results retained: {diagnostics['filtered_results']}")
-            st.write(f"Deduped company numbers: {diagnostics['deduped_results']}")
-            st.write(f"Already screened for {range_label}: {len(already_seen)}")
-            st.write(f"New companies to enrich: {len(new_companies)}")
-
+failures: List[str] = ]
+with st.status("Running Companies House screening...", expanded=True) as status:
+st.write(f"Searching incorporation dates from {start_date_str} to {end_date_str}.")
+companies, diagnostics = search_new_companies(client, start_date_str, end_date_str)
+already_seen = existing_company_numbers(conn, start_date_str, end_date_str)
+new_companies = [company for company in companies if company.get("company_number") not in already_seen]
+st.write(f"Raw search results: {diagnostics['raw_results']}")
+st.write(f"Filtered results retained: {diagnostics['filtered_results']}")
+st.write(f"Deduped company numbers: {diagnostics['deduped_results']}")
+st.write(f"Already screened for {range_label}: {len(already_seen)}")
+st.write(f"New companies to enrich: {len(new_companies)}")
             total_to_screen = len(new_companies)
-            progress = st.progress(
-                0,
-                text=f"Screened 0 of {total_to_screen} — {total_to_screen} remaining",
-            )
-
+progress = st.progress(
+0,
+text=f"Screened 0 of {total_to_screen} — {total_to_screen} remaining",
+)
             for index, item in enumerate(new_companies, start=1):
-                company_number = item.get("company_number", "unknown")
-                try:
-                    row = process_company(client, item)
-                    upsert_company(conn, row)
-                    if len(sample_debug) < 5:
-                        sample_debug.append({
-                            "company_number": company_number,
-                            "company_name": row.get("company_name"),
-                            "rating": row.get("rating"),
-                            "director_count": row.get("director_count"),
-                            "has_company_psc": row.get("has_company_psc"),
-                            "incorporation_date": row.get("incorporation_date"),
-                        })
-                except Exception as exc:
-                    failures.append(f"{company_number}: {exc}")
-
+company_number = item.get("company_number", "unknown")
+try:
+upsert_company(conn, process_company(client, item))
+except Exception as exc:
+failures.append(f"{company_number}: {exc}")
                 remaining = total_to_screen - index
-                progress.progress(
-                    index / max(total_to_screen, 1),
-                    text=f"Screened {index} of {total_to_screen} — {remaining} remaining",
-                )
-
+progress.progress(
+index / max(total_to_screen, 1),
+text=f"Screened {index} of {total_to_screen} — {remaining} remaining",
+)
             if total_to_screen == 0:
-                progress.progress(1.0, text="Screened 0 of 0 — 0 remaining")
-
+progress.progress(1.0, text="Screened 0 of 0 — 0 remaining")
             if failures:
-                st.warning(f"Failed enrichments: {len(failures)}")
-                st.code("\n".join(failures[:50]))
-                status.update(label="Completed with some errors", state="error")
-            else:
-                status.update(label="Refresh complete", state="complete")
-
-            # DEBUG: sample of processed companies
-            if sample_debug:
-                with st.expander("DEBUG: sample of processed companies", expanded=False):
-                    st.write(f"Processed {len(new_companies)} new companies. Showing up to 5 samples:")
-                    st.write(sample_debug)
-            else:
-                st.info("No new companies were processed (either 0 new companies or an early failure).")
-
-            # DEBUG: DB state after screening
-            post_df = read_db_rows(conn, start_date_str, end_date_str)
-            with st.expander("DEBUG: DB state after screening", expanded=False):
-                st.write(f"Rows in DB for {range_label} after screening: {len(post_df)}")
-                if not post_df.empty:
-                    cols = [
-                        "company_name", "company_number", "rating", "director_count",
-                        "has_company_psc", "international_director", "international_shareholder",
-                        "owned_by_company", "incorporation_date",
-                    ]
-                    available = [c for c in cols if c in post_df.columns]
-                    st.dataframe(post_df[available].head(20))
-                else:
-                    st.warning("Still 0 rows in DB after screening. This suggests upsert is not persisting or DB path is wrong.")
-
-            # DEBUG: DB file check (only if not in-memory)
-            if DB_PATH != ":memory:":
-                db_exists = os.path.exists(DB_PATH)
-                db_size = os.path.getsize(DB_PATH) if db_exists else None
-                with st.expander("DEBUG: DB file check", expanded=False):
-                    st.write(f"DB path: {os.path.abspath(DB_PATH)}")
-                    st.write(f"DB exists on disk: {db_exists}")
-                    if db_exists:
-                        st.write(f"DB size (bytes): {db_size}")
-                    else:
-                        st.error("DB file does not exist on disk. Your hosting environment is likely ephemeral; SQLite will not persist between requests.")
-
-    raw_df = read_db_rows(conn, start_date_str, end_date_str)
-    display_df = build_display_df(raw_df)
-
-    render_kpis(display_df)
-    filtered_df = apply_filters(display_df, only_flagged, selected_signals, sic_search, company_name_search, shortlisted_only, hide_mfg_wholesale)
-
+st.warning(f"Failed enrichments: {len(failures)}")
+st.code("\n".join(failures[:50]))
+status.update(label="Completed with some errors", state="error")
+else:
+status.update(label="Refresh complete", state="complete")
+    display_df = build_display_df(read_db_rows(conn, start_date_str, end_date_str))
+render_kpis(display_df)
+filtered_df = apply_filters(display_df, only_flagged, selected_signals, sic_search, company_name_search, shortlisted_only, hide_mfg_wholesale)
     tab_results, tab_shortlist, tab_settings = st.tabs(["Results", "Shortlist", "Settings"])
-    with tab_results:
-        st.subheader("Results")
-        st.caption(f"Loaded {len(api_keys)} API key(s) for {range_label}. {len(filtered_df):,} rows currently visible after filters.")
-        editable_columns = [
-            "Company Name", "Google Funding Search", "Shortlist", "Incorporation Date", "Target SIC", "Rating",
-            "Target Indicators", "SIC Code", "Signals", "International Director", "International Shareholder",
-            "Owned By A Company", "Profile", "Pulled At", "company_number",
-        ]
-        editor_df = filtered_df[editable_columns].copy()
-        edited_df = st.data_editor(
-            editor_df,
-            use_container_width=True,
-            hide_index=True,
-            disabled=[column for column in editable_columns if column not in {"Shortlist"}],
-            column_config={
-                "Shortlist": st.column_config.CheckboxColumn("Shortlist"),
-                "Google Funding Search": st.column_config.LinkColumn("Google Funding Search", display_text="Search funding"),
-                "Profile": st.column_config.LinkColumn("Profile", display_text="Open record"),
-                "company_number": None,
-            },
-            key=f"results_editor_{start_date_str}_{end_date_str}",
-        )
-        if not edited_df.empty:
-            changes = edited_df[["company_number", "Shortlist"]].merge(display_df[["company_number", "Shortlist"]], on="company_number", suffixes=("_new", "_old"), how="left")
-            changed_rows = changes[changes["Shortlist_new"] != changes["Shortlist_old"]]
-            for _, row in changed_rows.iterrows():
-                set_shortlisted_state(conn, row["company_number"], bool(row["Shortlist_new"]))
-            if not changed_rows.empty:
-                st.rerun()
-        st.download_button("Download filtered CSV", filtered_df.drop(columns=["company_number"], errors="ignore").to_csv(index=False).encode("utf-8"), f"companies_house_screening_{start_date_str}_{end_date_str}.csv", "text/csv", use_container_width=True)
-
+with tab_results:
+st.subheader("Results")
+st.caption(f"Loaded {len(api_keys)} API key(s) for {range_label}. {len(filtered_df):,} rows currently visible after filters.")
+editable_columns = [
+"Company Name", "Google Funding Search", "Shortlist", "Incorporation Date", "Target SIC", "Rating",
+"Target Indicators", "SIC Code", "Signals", "International Director", "International Shareholder",
+"Owned By A Company", "Profile", "Pulled At", "company_number",
+]
+editor_df = filtered_df[editable_columns].copy()
+edited_df = st.data_editor(
+editor_df,
+use_container_width=True,
+hide_index=True,
+disabled=[column for column in editable_columns if column not in {"Shortlist"}],
+column_config={
+"Shortlist": st.column_config.CheckboxColumn("Shortlist"),
+"Google Funding Search": st.column_config.LinkColumn("Google Funding Search", display_text="Search funding"),
+"Profile": st.column_config.LinkColumn("Profile", display_text="Open record"),
+"company_number": None,
+},
+key=f"results_editor_{start_date_str}_{end_date_str}",
+)
+if not edited_df.empty:
+changes = edited_df[["company_number", "Shortlist"]].merge(display_df[["company_number", "Shortlist"]], on="company_number", suffixes=("_new", "_old"), how="left")
+changed_rows = changes[changes["Shortlist_new"] != changes["Shortlist_old"]]
+for _, row in changed_rows.iterrows():
+set_shortlisted_state(conn, row["company_number"], bool(row["Shortlist_new"]))
+if not changed_rows.empty:
+st.rerun()
+st.download_button("Download filtered CSV", filtered_df.drop(columns=["company_number"], errors="ignore").to_csv(index=False).encode("utf-8"), f"companies_house_screening_{start_date_str}_{end_date_str}.csv", "text/csv", use_container_width=True)
     with tab_shortlist:
-        shortlist_df = display_df[display_df["Shortlist"]].copy()
-        if shortlist_df.empty:
-            st.info("No shortlisted companies yet. Tick the shortlist checkbox in the Results tab to build a follow-up queue.")
-        else:
-            st.dataframe(
-                shortlist_df.drop(columns=["company_number"], errors="ignore"),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Google Funding Search": st.column_config.LinkColumn("Google Funding Search", display_text="Search funding"),
-                    "Profile": st.column_config.LinkColumn("Profile", display_text="Open record"),
-                },
-            )
-            st.download_button("Download shortlist CSV", shortlist_df.drop(columns=["company_number"], errors="ignore").to_csv(index=False).encode("utf-8"), f"companies_house_shortlist_{start_date_str}_{end_date_str}.csv", "text/csv", use_container_width=True)
-
+shortlist_df = display_df[display_df["Shortlist"]].copy()
+if shortlist_df.empty:
+st.info("No shortlisted companies yet. Tick the shortlist checkbox in the Results tab to build a follow-up queue.")
+else:
+st.dataframe(
+shortlist_df.drop(columns=["company_number"], errors="ignore"),
+use_container_width=True,
+hide_index=True,
+column_config={
+"Google Funding Search": st.column_config.LinkColumn("Google Funding Search", display_text="Search funding"),
+"Profile": st.column_config.LinkColumn("Profile", display_text="Open record"),
+},
+)
+st.download_button("Download shortlist CSV", shortlist_df.drop(columns=["company_number"], errors="ignore").to_csv(index=False).encode("utf-8"), f"companies_house_shortlist_{start_date_str}_{end_date_str}.csv", "text/csv", use_container_width=True)
     with tab_settings:
-        st.subheader("Current search settings")
-        st.markdown(f"""
-- Incorporation date range: `{range_label}`
-- Company status: Active
-- Company types sent to API: `{', '.join(ALLOWED_COMPANY_TYPES)}`
-- SIC codes sent to API: {len(ALL_ALLOWED_SIC_CODES)}
-- Target SIC codes: `{', '.join(sorted(TARGET_SIC_CODES))}`
-- Dedupe rule: company numbers already screened within the selected date range are skipped
-        """)
-
-
-if __name__ == "__main__":
-    main()
+st.subheader("Current search settings")
+st.markdown(f"""
+Incorporation date range: {range_label}
+Company status: Active
+Company types sent to API: {', '.join(ALLOWED_COMPANY_TYPES)}
+SIC codes sent to API: {len(ALL_ALLOWED_SIC_CODES)}
+Target SIC codes: {', '.join(sorted(TARGET_SIC_CODES))}
+Dedupe rule: company numbers already screened within the selected date range are skipped
+""")
+if _name_ == "_main_":
+main()
