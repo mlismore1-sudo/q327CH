@@ -30,7 +30,7 @@ MANUFACTURING_WHOLESALE_SIC_CODES = {
     "20412", "20590", "21100", "22210", "22290", "23190", "23910", "23990", "24100", "24200", "24310",
     "24320", "24330", "24340", "24410", "24420", "24430", "24340", "24440", "24450", "24460", "24510",
     "25110", "25210", "25500", "25990", "26110", "26200", "26300", "26511", "26512", "26600", "27110",
-    "27200", "28110", "28290", "28300", "28990", "29100", "29310", "30110", "30300", "31090", "32990",
+    "27200", "28110", "28290", "28300", "28998", "29100", "29310", "30110", "30300", "31090", "32990",
     "46110", "46120", "46130", "46140", "46150", "46160", "46170", "46180", "46190", "46210", "46220",
     "46230", "46240", "46310", "46320", "46330", "46341", "46342", "46350", "46360", "46370", "46380",
     "46390", "46410", "46420", "46431", "46439", "46440", "46450", "46460", "46470", "46480", "46499",
@@ -77,6 +77,22 @@ NATIONALITY_TO_COUNTRY = {
     "singaporean": "singapore", "dutch": "netherlands", "netherlands": "netherlands",
 }
 SIGNAL_OPTIONS = ["International Director", "International Shareholder", "Owned By A Company"]
+
+# New constants for updated rating logic
+EXCLUDED_COUNTRIES = {"pakistan", "nigeria", "canada"}
+
+ELIGIBLE_FOREIGN_COUNTRIES = {
+    "united states",
+    "sweden", "norway", "finland", "denmark", "iceland",
+    "france", "germany", "belgium", "netherlands", "austria",
+    "poland", "spain", "portugal", "greece", "italy",
+    "hungary", "croatia", "ireland", "czechia", "czech republic",
+    "slovakia", "slovenia", "estonia", "latvia", "lithuania",
+    "romania", "bulgaria", "cyprus", "malta", "luxembourg",
+    "china", "hong kong", "singapore",
+}
+
+NAME_KEYWORDS = ["ai", "technology", "technologies", "labs", "group", "uk", "europe"]
 
 
 def apply_custom_css() -> None:
@@ -240,6 +256,14 @@ def init_db() -> sqlite3.Connection:
     ensure_column(conn, "screened_companies", "target_address", "INTEGER DEFAULT 0")
     ensure_column(conn, "screened_companies", "target_address_detail", "TEXT")
     ensure_column(conn, "screened_companies", "target_indicators", "TEXT")
+
+    # New columns for updated rating logic
+    ensure_column(conn, "screened_companies", "rating", "TEXT")
+    ensure_column(conn, "screened_companies", "director_count", "INTEGER DEFAULT 0")
+    ensure_column(conn, "screened_companies", "has_company_psc", "INTEGER DEFAULT 0")
+    ensure_column(conn, "screened_companies", "has_any_psc", "INTEGER DEFAULT 0")
+    ensure_column(conn, "screened_companies", "eligible_foreign_director_countries", "TEXT")
+
     return conn
 
 
@@ -265,8 +289,9 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
             international_shareholder, international_shareholder_detail,
             owned_by_company, owner_company_name, pulled_at, raw_json,
             profile_url, shortlisted, target_sic, target_address,
-            target_address_detail, target_indicators
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            target_address_detail, target_indicators,
+            rating, director_count, has_company_psc, has_any_psc, eligible_foreign_director_countries
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row["company_number"], row["company_name"], row["sic_code"], row["incorporation_date"], row["company_type"],
@@ -276,6 +301,8 @@ def upsert_company(conn: sqlite3.Connection, row: Dict[str, Any]) -> None:
             json.dumps(row.get("raw_json", {})), row.get("profile_url", ""), int(row.get("shortlisted", False)),
             int(row.get("target_sic", False)), int(row.get("target_address", False)),
             row.get("target_address_detail", ""), row.get("target_indicators", ""),
+            row.get("rating", ""), row.get("director_count", 0), int(row.get("has_company_psc", False)),
+            int(row.get("has_any_psc", False)), json.dumps(row.get("eligible_foreign_director_countries", [])),
         ),
     )
     conn.commit()
@@ -350,36 +377,122 @@ def get_all_pscs(client: CHClient, company_number: str) -> List[Dict[str, Any]]:
     return paged_get_items(client, f"/company/{company_number}/persons-with-significant-control", PSC_PAGE_SIZE)
 
 
-def collect_international_director_details(client: CHClient, company_number: str) -> Tuple[bool, List[str], int]:
-    matches: List[str] = []
+def is_eu_country(country: str) -> bool:
+    eu = {
+        "france", "germany", "belgium", "netherlands", "austria",
+        "poland", "spain", "portugal", "greece", "italy",
+        "hungary", "croatia", "ireland", "czechia", "czech republic",
+        "slovakia", "slovenia", "estonia", "latvia", "lithuania",
+        "romania", "bulgaria", "cyprus", "malta", "luxembourg",
+    }
+    return country.lower() in eu
+
+
+def is_eligible_foreign_country(country: str) -> bool:
+    norm = normalize_text(country)
+    if not norm:
+        return False
+    if norm in EXCLUDED_COUNTRIES:
+        return False
+    return norm in ELIGIBLE_FOREIGN_COUNTRIES
+
+
+def name_keyword_score(company_name: str) -> int:
+    text = normalize_text(company_name or "")
+    score = 0
+    for kw in NAME_KEYWORDS:
+        if kw in text:
+            score += 1
+    return score
+
+
+def collect_international_director_details(client: CHClient, company_number: str) -> Tuple[bool, List[str], int, List[str]]:
+    """
+    Returns:
+      - has_international_director: bool (any eligible foreign director)
+      - director_details: list of country labels for display (eligible foreign only)
+      - director_count: total number of directors (all countries)
+      - eligible_foreign_director_countries: list of normalized country strings for eligible foreign directors
+    """
+    director_matches: List[str] = []
+    eligible_foreign_director_countries: List[str] = []
     director_count = 0
+
     for officer in get_all_officers(client, company_number):
-        role = normalize_text(officer.get("officer_role"))
+        role = normalize_text(officer.get("officer_role", ""))
         if "director" not in role and role != "designated member":
             continue
         director_count += 1
+
+        # Prefer country_of_residence, then address country, then nationality
+        country_value = None
         for value in [officer.get("country_of_residence"), (officer.get("address") or {}).get("country"), officer.get("nationality")]:
-            if canonical_country_from_value(value):
-                matches.append(str(value))
-    matches = dedupe_preserve_order(matches)
-    return bool(matches), matches, director_count
+            if value:
+                country_value = value
+                break
+
+        if not country_value:
+            continue
+
+        country_canon = canonical_country_from_value(country_value)
+        if not country_canon:
+            continue
+
+        # Exclude Pakistan, Nigeria, Canada from contributing to flags/rating
+        if normalize_text(country_canon) in EXCLUDED_COUNTRIES:
+            continue
+
+        if is_eligible_foreign_country(country_canon):
+            director_matches.append(str(country_value))
+            eligible_foreign_director_countries.append(country_canon)
+
+    director_matches = dedupe_preserve_order(director_matches)
+    eligible_foreign_director_countries = dedupe_preserve_order(eligible_foreign_director_countries)
+    has_international_director = bool(eligible_foreign_director_countries)
+    return has_international_director, director_matches, director_count, eligible_foreign_director_countries
 
 
-def analyse_psc_flags(client: CHClient, company_number: str) -> Tuple[bool, List[str], bool, List[str]]:
+def analyse_psc_flags(client: CHClient, company_number: str) -> Tuple[bool, List[str], bool, List[str], bool]:
+    """
+    Returns:
+      - has_international_shareholder: bool (any PSC with eligible foreign country)
+      - shareholder_matches: list of country labels for display
+      - has_company_psc: bool (any PSC that is a company/legal-person/corporate)
+      - owner_names: list of owner company names
+      - has_any_psc: bool (any PSC at all, corporate or individual)
+    """
     shareholder_matches: List[str] = []
     owner_names: List[str] = []
+    has_company_psc = False
+    has_any_psc = False
+
     for psc in get_all_pscs(client, company_number):
+        has_any_psc = True
         kind = str(psc.get("kind", ""))
-        for value in [psc.get("country_of_residence"), (psc.get("address") or {}).get("country"), psc.get("nationality")]:
-            if canonical_country_from_value(value):
-                shareholder_matches.append(str(value))
+
+        # Corporate / legal-person PSC
         if kind in COMPANY_OWNER_KINDS or "corporate" in kind or "legal-person" in kind:
+            has_company_psc = True
             name = str(psc.get("name") or "").strip()
             if name:
                 owner_names.append(name)
+
+        # Country checks for individuals or entities
+        for value in [psc.get("country_of_residence"), (psc.get("address") or {}).get("country"), psc.get("nationality")]:
+            if not value:
+                continue
+            country_canon = canonical_country_from_value(value)
+            if not country_canon:
+                continue
+            if normalize_text(country_canon) in EXCLUDED_COUNTRIES:
+                continue
+            if is_eligible_foreign_country(country_canon):
+                shareholder_matches.append(str(value))
+
     shareholder_matches = dedupe_preserve_order(shareholder_matches)
     owner_names = dedupe_preserve_order(owner_names)
-    return bool(shareholder_matches), shareholder_matches, bool(owner_names), owner_names
+    has_international_shareholder = bool(shareholder_matches)
+    return has_international_shareholder, shareholder_matches, has_company_psc, owner_names, has_any_psc
 
 
 def parse_matching_sic(item: Dict[str, Any]) -> str:
@@ -418,19 +531,96 @@ def build_target_indicators(target_sic: bool, target_address: bool, director_det
 
 
 def build_rating(international_director: bool, international_shareholder: bool, owned_by_company: bool, target_sic: bool, director_details: List[str], shareholder_details: List[str]) -> str:
+    # Legacy function kept for reference; not used in new logic
     stars = sum([international_director, international_shareholder, owned_by_company, target_sic])
     if has_bonus_star(director_details) or has_bonus_star(shareholder_details):
         stars += 1
     return "⭐" * stars
 
 
+def build_rating_new(
+    company_name: str,
+    director_count: int,
+    eligible_foreign_director_countries: List[str],
+    has_company_psc: bool,
+    has_any_psc: bool,
+) -> str:
+    """
+    New rating rules:
+
+    Base stars:
+    - +1 if has a PSC that is a company (has_company_psc)
+    - +1 per eligible foreign director (US/EU/China/HK/SG), each director counts once
+    - +1 per name keyword match (AI, Technology, Technologies, Labs, Group, UK, Europe)
+    - +1 per director above 1 (i.e. max(0, director_count - 1))
+
+    Minimum floors:
+    - If director_count >= 2 and at least one eligible foreign director: min 5★
+    - If director_count >= 3 and at least one eligible foreign director: min 6★
+    - If director_count >= 2 and at least one eligible foreign director and has_company_psc: min 7★
+    - If has_company_psc: min 3★
+    """
+    stars = 0
+
+    # 1. Company PSC
+    if has_company_psc:
+        stars += 1
+
+    # 2. Eligible foreign directors (1 star per director, not per country)
+    num_eligible_foreign_directors = len(eligible_foreign_director_countries)
+    stars += num_eligible_foreign_directors
+
+    # 3. Name keywords
+    stars += name_keyword_score(company_name)
+
+    # 4. Extra directors above 1
+    if director_count > 1:
+        stars += director_count - 1
+
+    # Apply minimum floors
+    has_eligible_foreign = num_eligible_foreign_directors > 0
+
+    if director_count >= 3 and has_eligible_foreign:
+        stars = max(stars, 6)
+    elif director_count >= 2 and has_eligible_foreign:
+        stars = max(stars, 5)
+
+    if director_count >= 2 and has_eligible_foreign and has_company_psc:
+        stars = max(stars, 7)
+
+    if has_company_psc:
+        stars = max(stars, 3)
+
+    return "⭐" * stars
+
+
 def process_company(client: CHClient, item: Dict[str, Any]) -> Dict[str, Any]:
     company_number = item.get("company_number", "")
     company_name = item.get("company_name") or item.get("title") or ""
-    international_director, director_details, director_count = collect_international_director_details(client, company_number)
-    international_shareholder, shareholder_details, owned_by_company, owner_names = analyse_psc_flags(client, company_number)
+
+    # Directors
+    international_director, director_details, director_count, eligible_foreign_director_countries = collect_international_director_details(client, company_number)
+
+    # PSCs
+    international_shareholder, shareholder_details, has_company_psc, owner_names, has_any_psc = analyse_psc_flags(client, company_number)
+
     target_sic = is_target_sic(item)
     target_address, target_address_detail = is_target_address(item)
+
+    # Build display strings
+    director_detail_str = format_flagged_countries(director_details)
+    shareholder_detail_str = format_flagged_countries(shareholder_details)
+    owner_company_str = " | ".join(f"✓ {name}" for name in owner_names) if owner_names else ""
+
+    # New rating
+    rating = build_rating_new(
+        company_name=company_name,
+        director_count=director_count,
+        eligible_foreign_director_countries=eligible_foreign_director_countries,
+        has_company_psc=has_company_psc,
+        has_any_psc=has_any_psc,
+    )
+
     return {
         "company_number": company_number,
         "company_name": company_name,
@@ -438,11 +628,11 @@ def process_company(client: CHClient, item: Dict[str, Any]) -> Dict[str, Any]:
         "incorporation_date": item.get("date_of_creation", ""),
         "company_type": item.get("company_type", ""),
         "international_director": international_director,
-        "international_director_detail": format_flagged_countries(director_details),
+        "international_director_detail": director_detail_str,
         "international_shareholder": international_shareholder,
-        "international_shareholder_detail": format_flagged_countries(shareholder_details),
-        "owned_by_company": owned_by_company,
-        "owner_company_name": " | ".join(f"✓ {name}" for name in owner_names),
+        "international_shareholder_detail": shareholder_detail_str,
+        "owned_by_company": has_company_psc,
+        "owner_company_name": owner_company_str,
         "pulled_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
         "raw_json": item,
         "profile_url": make_company_profile_url(company_number, company_name),
@@ -451,6 +641,11 @@ def process_company(client: CHClient, item: Dict[str, Any]) -> Dict[str, Any]:
         "target_address": target_address,
         "target_address_detail": target_address_detail,
         "target_indicators": build_target_indicators(target_sic, target_address, director_details, shareholder_details, director_count),
+        "rating": rating,
+        "director_count": director_count,
+        "has_company_psc": has_company_psc,
+        "has_any_psc": has_any_psc,
+        "eligible_foreign_director_countries": eligible_foreign_director_countries,
     }
 
 
@@ -462,24 +657,31 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
     ]
     if db_df.empty:
         return pd.DataFrame(columns=columns)
+
     rows = []
     for _, row in db_df.iterrows():
         director_values = [value.strip() for value in str(row.get("international_director_detail", "")).split("|") if value.strip()]
         shareholder_values = [value.strip() for value in str(row.get("international_shareholder_detail", "")).split("|") if value.strip()]
+
         signals = []
         for flag in extract_country_flags(director_values) + extract_country_flags(shareholder_values):
             if flag not in signals:
                 signals.append(flag)
         if str(row.get("owner_company_name", "")).startswith("✓"):
             signals.append("🏢")
+
         company_name = row.get("company_name", "")
+
+        # Use the rating stored in the DB (computed by build_rating_new)
+        rating = row.get("rating", "")
+
         rows.append({
             "Company Name": company_name,
             "Google Funding Search": make_google_funding_search_url(company_name),
             "Shortlist": bool(row.get("shortlisted", 0)),
             "Incorporation Date": row.get("incorporation_date", ""),
             "Target SIC": "🎯" if bool(row.get("target_sic", 0)) else "",
-            "Rating": build_rating(bool(extract_country_flags(director_values)), bool(extract_country_flags(shareholder_values)), str(row.get("owner_company_name", "")).startswith("✓"), bool(row.get("target_sic", 0)), director_values, shareholder_values),
+            "Rating": rating,
             "Target Indicators": row.get("target_indicators", ""),
             "SIC Code": row.get("sic_code", ""),
             "Signals": " ".join(signals),
@@ -490,6 +692,7 @@ def build_display_df(db_df: pd.DataFrame) -> pd.DataFrame:
             "Pulled At": row.get("pulled_at", ""),
             "company_number": row.get("company_number", ""),
         })
+
     return pd.DataFrame(rows, columns=columns)
 
 
